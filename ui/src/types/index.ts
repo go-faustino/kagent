@@ -230,17 +230,93 @@ export interface McpServerTool extends TypedLocalReference {
   requireApproval?: string[];
 }
 
-export type AgentType = "Declarative" | "BYO";
+export type AgentType = "Declarative" | "BYO" | "Sandbox";
 
 export interface SkillForAgent {
   insecureSkipVerify?: boolean;
   refs?: string[];
 }
 
+/** Mirrors agent-sandbox SandboxTemplate spec.networkPolicyManagement; omit for Unmanaged (kagent default). */
+export type SandboxNetworkPolicyManagement = "Managed" | "Unmanaged";
+
+// --- networking.k8s.io/v1 (subset used by NetworkPolicy ingress/egress rules) ---
+
+/** Same JSON shape as core.v1.Protocol. */
+export type KubernetesProtocol = "TCP" | "UDP" | "SCTP";
+
+/** IntOrString as in Kubernetes API (named port or numeric). */
+export type KubernetesIntOrString = string | number;
+
+export interface KubernetesLabelSelector {
+  matchLabels?: Record<string, string>;
+  matchExpressions?: KubernetesLabelSelectorRequirement[];
+}
+
+export type KubernetesLabelSelectorOperator =
+  | "In"
+  | "NotIn"
+  | "Exists"
+  | "DoesNotExist";
+
+export interface KubernetesLabelSelectorRequirement {
+  key: string;
+  operator: KubernetesLabelSelectorOperator;
+  values?: string[];
+}
+
+export interface KubernetesIPBlock {
+  cidr: string;
+  except?: string[];
+}
+
+/** networking.k8s.io/v1.NetworkPolicyPeer */
+export interface KubernetesNetworkPolicyPeer {
+  podSelector?: KubernetesLabelSelector;
+  namespaceSelector?: KubernetesLabelSelector;
+  ipBlock?: KubernetesIPBlock;
+}
+
+/** networking.k8s.io/v1.NetworkPolicyPort */
+export interface KubernetesNetworkPolicyPort {
+  protocol?: KubernetesProtocol;
+  port?: KubernetesIntOrString;
+  endPort?: number;
+}
+
+/** networking.k8s.io/v1.NetworkPolicyIngressRule */
+export interface KubernetesNetworkPolicyIngressRule {
+  from?: KubernetesNetworkPolicyPeer[];
+  ports?: KubernetesNetworkPolicyPort[];
+}
+
+/** networking.k8s.io/v1.NetworkPolicyEgressRule */
+export interface KubernetesNetworkPolicyEgressRule {
+  to?: KubernetesNetworkPolicyPeer[];
+  ports?: KubernetesNetworkPolicyPort[];
+}
+
+/**
+ * Ingress/egress only (pod selector and policyTypes are owned by agent-sandbox).
+ * Same shape as extensions.agents.x-k8s.io SandboxTemplate.spec.networkPolicy.
+ */
+export interface SandboxNetworkPolicySpec {
+  ingress?: KubernetesNetworkPolicyIngressRule[];
+  egress?: KubernetesNetworkPolicyEgressRule[];
+}
+
+export interface SandboxAgentSpec {
+  declarative: DeclarativeAgentSpec;
+  networkPolicyManagement?: SandboxNetworkPolicyManagement;
+  /** When networkPolicyManagement is Managed; ignored when Unmanaged. */
+  networkPolicy?: SandboxNetworkPolicySpec;
+}
+
 export interface AgentSpec {
   type: AgentType;
   declarative?: DeclarativeAgentSpec;
   byo?: BYOAgentSpec;
+  sandbox?: SandboxAgentSpec;
   description: string;
   skills?: SkillForAgent;
   memory?: MemorySpec;
@@ -259,6 +335,8 @@ export interface DeclarativeAgentSpec {
   a2aConfig?: A2AConfig;
   context?: ContextConfig;
   deployment?: DeclarativeDeploymentSpec;
+  /** Long-term memory (same shape as Kubernetes declarative spec). */
+  memory?: MemorySpec;
 }
 
 export interface ContextConfig {

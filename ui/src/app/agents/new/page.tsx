@@ -4,8 +4,9 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Brain, Loader2, Settings2, PlusCircle, Trash2, Layers } from "lucide-react";
-import { ModelConfig, AgentType, ContextConfig } from "@/types";
+import { Brain, Info, Loader2, Settings2, PlusCircle, Trash2, Layers, Shield } from "lucide-react";
+import { ModelConfig, AgentType, ContextConfig, SandboxNetworkPolicyManagement, SandboxNetworkPolicySpec } from "@/types";
+import { SandboxNetworkPolicySection } from "@/components/create/SandboxNetworkPolicySection";
 import { SystemPromptSection } from "@/components/create/SystemPromptSection";
 import { ModelSelectionSection } from "@/components/create/ModelSelectionSection";
 import { ToolsSection } from "@/components/create/ToolsSection";
@@ -23,7 +24,7 @@ import { NamespaceCombobox } from "@/components/NamespaceCombobox";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-
+import { Alert, AlertDescription } from "@/components/ui/alert";
 interface ValidationErrors {
   name?: string;
   namespace?: string;
@@ -37,6 +38,7 @@ interface ValidationErrors {
   memoryModel?: string;
   memoryTtl?: string;
   serviceAccountName?: string;
+  sandboxNetworkPolicy?: string;
 }
 
 interface AgentPageContentProps {
@@ -63,6 +65,9 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
   const router = useRouter();
   const { models, loading, error, createNewAgent, updateAgent, getAgent, validateAgentData } = useAgents();
 
+  /** Declarative and Sandbox share the same model/tools/memory UI; Sandbox runs in an isolated workload. */
+  const usesDeclarativeUi = (t: AgentType) => t === "Declarative" || t === "Sandbox";
+
   type SelectedModelType = Pick<ModelConfig, 'ref' | 'model'>;
 
   interface FormState {
@@ -86,6 +91,8 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
     stream: boolean;
     contextConfig: ContextConfig | undefined;
     serviceAccountName: string;
+    sandboxNetworkPolicyManagement: SandboxNetworkPolicyManagement;
+    sandboxNetworkPolicy: SandboxNetworkPolicySpec;
     isSubmitting: boolean;
     isLoading: boolean;
     errors: ValidationErrors;
@@ -112,6 +119,8 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
     stream: false,
     contextConfig: undefined,
     serviceAccountName: "",
+    sandboxNetworkPolicyManagement: "Unmanaged",
+    sandboxNetworkPolicy: {},
     isSubmitting: false,
     isLoading: isEditMode,
     errors: {},
@@ -141,26 +150,48 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                 agentType: agent.spec.type,
               };
               // v1alpha2: read type and split specs
-              if (agent.spec.type === "Declarative") {
-                const memorySpec = agent.spec?.memory;
+              if (usesDeclarativeUi(agent.spec.type)) {
+                const decl =
+                  agent.spec.type === "Declarative"
+                    ? agent.spec?.declarative
+                    : agent.spec?.sandbox?.declarative;
+                const memorySpec = decl?.memory ?? agent.spec?.memory;
                 const memoryModelConfig = memorySpec?.modelConfig
                   ? `${agent.metadata.namespace}/${memorySpec.modelConfig}`
                   : "";
+                let sandboxNetworkPolicy: SandboxNetworkPolicySpec = {};
+                if (agent.spec.type === "Sandbox" && agent.spec.sandbox?.networkPolicy) {
+                  const np = agent.spec.sandbox.networkPolicy;
+                  try {
+                    sandboxNetworkPolicy = structuredClone(np) as SandboxNetworkPolicySpec;
+                  } catch {
+                    sandboxNetworkPolicy = {
+                      ...(np.ingress?.length ? { ingress: [...np.ingress] } : {}),
+                      ...(np.egress?.length ? { egress: [...np.egress] } : {}),
+                    };
+                  }
+                }
                 setState(prev => ({
                   ...prev,
                   ...baseUpdates,
-                  systemPrompt: agent.spec?.declarative?.systemMessage || "",
-                  selectedTools: (agent.spec?.declarative?.tools && agentResponse.tools) ? agentResponse.tools : [],
+                  systemPrompt: decl?.systemMessage || "",
+                  selectedTools: (decl?.tools && agentResponse.tools) ? agentResponse.tools : [],
                   selectedModel: agentResponse.modelConfigRef ? { model: agentResponse.model || "default-model-config", ref: agentResponse.modelConfigRef } : null,
                   skillRefs: (agent.spec?.skills?.refs && agent.spec.skills.refs.length > 0) ? agent.spec.skills.refs : [""],
-                  stream: agent.spec?.declarative?.stream ?? false,
+                  stream: decl?.stream ?? false,
                   selectedMemoryModel: memoryModelConfig ? { model: memorySpec?.modelConfig || "", ref: memoryModelConfig } : null,
                   memoryTtlDays: memorySpec?.ttlDays ? String(memorySpec.ttlDays) : "",
-                  contextConfig: agent.spec?.declarative?.context,
-                  serviceAccountName: agent.spec?.declarative?.deployment?.serviceAccountName || "",
+                  contextConfig: decl?.context,
+                  serviceAccountName: decl?.deployment?.serviceAccountName || "",
                   byoImage: "",
                   byoCmd: "",
                   byoArgs: "",
+                  sandboxNetworkPolicyManagement:
+                    agent.spec.type === "Sandbox" &&
+                    agent.spec.sandbox?.networkPolicyManagement === "Managed"
+                      ? "Managed"
+                      : "Unmanaged",
+                  sandboxNetworkPolicy,
                 }));
               } else {
                 setState(prev => ({
@@ -171,6 +202,8 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                   selectedTools: [],
                   selectedMemoryModel: null,
                   memoryTtlDays: "",
+                  sandboxNetworkPolicyManagement: "Unmanaged",
+                  sandboxNetworkPolicy: {},
                   byoImage: agent.spec?.byo?.deployment?.image || "",
                   byoCmd: agent.spec?.byo?.deployment?.cmd || "",
                   byoArgs: (agent.spec?.byo?.deployment?.args || []).join(" "),
@@ -231,11 +264,14 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
         : undefined,
       context: state.contextConfig,
       serviceAccountName: state.serviceAccountName,
+      sandboxNetworkPolicyManagement:
+        state.agentType === "Sandbox" ? state.sandboxNetworkPolicyManagement : undefined,
+      sandboxNetworkPolicy: state.agentType === "Sandbox" ? state.sandboxNetworkPolicy : undefined,
     };
 
     const newErrors = validateAgentData(formData);
 
-    if (state.agentType === "Declarative" && state.skillRefs && state.skillRefs.length > 0) {
+    if (usesDeclarativeUi(state.agentType) && state.skillRefs && state.skillRefs.length > 0) {
       // Filter out empty/whitespace entries first - if all are empty, treat as "no skills"
       const nonEmptyRefs = state.skillRefs.filter(ref => ref.trim());
       
@@ -318,8 +354,8 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
     try {
 
       setState(prev => ({ ...prev, isSubmitting: true }));
-      if (state.agentType === "Declarative" && !state.selectedModel) {
-        throw new Error("Model is required to create a declarative agent.");
+      if (usesDeclarativeUi(state.agentType) && !state.selectedModel) {
+        throw new Error("Model is required for this agent type.");
       }
 
       const memoryEnabled = !!(state.selectedMemoryModel?.ref || state.memoryTtlDays);
@@ -333,14 +369,14 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
         modelName: state.selectedModel?.ref || "",
         stream: state.stream,
         tools: state.selectedTools,
-        skillRefs: state.agentType === "Declarative" ? (state.skillRefs || []).filter(ref => ref.trim()) : undefined,
-        memory: state.agentType === "Declarative" && memoryEnabled
+        skillRefs: usesDeclarativeUi(state.agentType) ? (state.skillRefs || []).filter(ref => ref.trim()) : undefined,
+        memory: usesDeclarativeUi(state.agentType) && memoryEnabled
           ? {
             modelConfig: state.selectedMemoryModel?.ref || "",
             ttlDays: state.memoryTtlDays ? parseInt(state.memoryTtlDays, 10) : undefined,
           }
           : undefined,
-        context: state.agentType === "Declarative" ? state.contextConfig : undefined,
+        context: usesDeclarativeUi(state.agentType) ? state.contextConfig : undefined,
         // BYO
         byoImage: state.byoImage,
         byoCmd: state.byoCmd || undefined,
@@ -371,6 +407,9 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
           })
           .filter((e): e is EnvVar => e !== null),
         serviceAccountName: state.serviceAccountName.trim() || undefined,
+        sandboxNetworkPolicyManagement:
+          state.agentType === "Sandbox" ? state.sandboxNetworkPolicyManagement : undefined,
+        sandboxNetworkPolicy: state.agentType === "Sandbox" ? state.sandboxNetworkPolicy : undefined,
       };
 
       let result;
@@ -454,13 +493,24 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                 <div>
                   <Label className="text-base mb-2 block font-bold">Agent Type</Label>
                   <p className="text-xs mb-2 block text-muted-foreground">
-                    Choose declarative (uses a model) or BYO (bring your own containerized agent).
+                    Declarative or Sandbox: model, tools, and prompts below. BYO: your own container image.
                   </p>
                   <Select
                     value={state.agentType}
                     onValueChange={(val) => {
-                      setState(prev => ({ ...prev, agentType: val as AgentType }));
-                      validateField('type', val);
+                      const next = val as AgentType;
+                      setState((prev) => ({
+                        ...prev,
+                        agentType: next,
+                        ...(next !== "Sandbox"
+                          ? {
+                              sandboxNetworkPolicyManagement: "Unmanaged",
+                              sandboxNetworkPolicy: {},
+                              errors: { ...prev.errors, sandboxNetworkPolicy: undefined },
+                            }
+                          : {}),
+                      }));
+                      validateField("type", val);
                     }}
                     disabled={state.isSubmitting || state.isLoading}
                   >
@@ -469,6 +519,7 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Declarative">Declarative</SelectItem>
+                      <SelectItem value="Sandbox">Sandbox</SelectItem>
                       <SelectItem value="BYO">BYO</SelectItem>
                     </SelectContent>
                   </Select>
@@ -490,7 +541,7 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                   {state.errors.description && <p className="text-red-500 text-sm mt-1">{state.errors.description}</p>}
                 </div>
 
-                {state.agentType === "Declarative" && (
+                {usesDeclarativeUi(state.agentType) && (
                   <>
                     <SystemPromptSection
                       value={state.systemPrompt}
@@ -704,7 +755,39 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                 )}
               </CardContent>
             </Card>
-            {state.agentType === "Declarative" && (
+            {state.agentType === "Sandbox" && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-xl font-bold">
+                    <Shield className="h-5 w-5 text-slate-500" />
+                    Sandbox network policy
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <SandboxNetworkPolicySection
+                    networkPolicyManagement={state.sandboxNetworkPolicyManagement}
+                    onNetworkPolicyManagementChange={(v) =>
+                      setState((prev) => ({
+                        ...prev,
+                        sandboxNetworkPolicyManagement: v,
+                        errors: { ...prev.errors, sandboxNetworkPolicy: undefined },
+                      }))
+                    }
+                    networkPolicy={state.sandboxNetworkPolicy}
+                    onNetworkPolicyChange={(v) =>
+                      setState((prev) => ({
+                        ...prev,
+                        sandboxNetworkPolicy: v,
+                        errors: { ...prev.errors, sandboxNetworkPolicy: undefined },
+                      }))
+                    }
+                    error={state.errors.sandboxNetworkPolicy}
+                    disabled={state.isSubmitting || state.isLoading}
+                  />
+                </CardContent>
+              </Card>
+            )}
+            {usesDeclarativeUi(state.agentType) && (
               <>
                 <Card>
                   <CardHeader>

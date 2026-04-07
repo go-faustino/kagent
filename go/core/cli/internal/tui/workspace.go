@@ -515,9 +515,10 @@ func (m *workspaceModel) renderDetails() {
 		fmt.Fprintf(&m.details, "\n%s\n", m.agent.Agent.Spec.Description)
 	}
 	// Tools information (if declarative tools are present)
-	if m.agent.Agent != nil && m.agent.Agent.Spec.Declarative != nil && len(m.agent.Agent.Spec.Declarative.Tools) > 0 {
+	decl := m.agent.Agent.Spec.EffectiveDeclarative()
+	if m.agent.Agent != nil && decl != nil && len(decl.Tools) > 0 {
 		fmt.Fprintf(&m.details, "\nTools:\n")
-		for _, t := range m.agent.Agent.Spec.Declarative.Tools {
+		for _, t := range decl.Tools {
 			switch t.Type {
 			case v1alpha2.ToolProviderType_McpServer:
 				name := ""

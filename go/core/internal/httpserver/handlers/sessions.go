@@ -8,9 +8,11 @@ import (
 
 	"github.com/kagent-dev/kagent/go/api/database"
 	api "github.com/kagent-dev/kagent/go/api/httpapi"
+	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/errors"
 	"github.com/kagent-dev/kagent/go/core/internal/utils"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
@@ -129,6 +131,22 @@ func (h *SessionsHandler) HandleCreateSession(w ErrorResponseWriter, r *http.Req
 	if err != nil {
 		w.RespondWithError(errors.NewBadRequestError(fmt.Sprintf("Agent ref is invalid, please check the agent ref %s", *sessionRequest.AgentRef), err))
 		return
+	}
+
+	nn, perr := utils.ParseRefString(*sessionRequest.AgentRef, "")
+	if perr == nil {
+		k8sAgent := &v1alpha2.Agent{}
+		if err := h.KubeClient.Get(r.Context(), client.ObjectKey{Namespace: nn.Namespace, Name: nn.Name}, k8sAgent); err == nil && k8sAgent.Spec.Type == v1alpha2.AgentType_Sandbox {
+			existing, lerr := h.DatabaseService.ListSessionsForAgent(r.Context(), agent.ID, userID)
+			if lerr != nil {
+				w.RespondWithError(errors.NewInternalServerError("Failed to list sessions for agent", lerr))
+				return
+			}
+			if len(existing) > 0 {
+				w.RespondWithError(errors.NewConflictError("Sandbox agents support only one chat session per user", fmt.Errorf("a session already exists for this agent")))
+				return
+			}
+		}
 	}
 
 	session := &database.Session{
@@ -291,6 +309,24 @@ func (h *SessionsHandler) HandleDeleteSession(w ErrorResponseWriter, r *http.Req
 		return
 	}
 	log = log.WithValues("session_id", sessionID)
+
+	session, err := h.DatabaseService.GetSession(r.Context(), sessionID, userID)
+	if err != nil {
+		w.RespondWithError(errors.NewNotFoundError("Session not found", err))
+		return
+	}
+
+	if session.AgentID != nil {
+		dbAgent, aerr := h.DatabaseService.GetAgent(r.Context(), *session.AgentID)
+		if aerr != nil {
+			w.RespondWithError(errors.NewInternalServerError("Failed to get agent for session", aerr))
+			return
+		}
+		if dbAgent.Type == string(v1alpha2.AgentType_Sandbox) {
+			w.RespondWithError(errors.NewConflictError("Sandbox agents use a single chat session; deleting it is not allowed", nil))
+			return
+		}
+	}
 
 	if err := h.DatabaseService.DeleteSession(r.Context(), sessionID, userID); err != nil {
 		w.RespondWithError(errors.NewInternalServerError("Failed to delete session", err))

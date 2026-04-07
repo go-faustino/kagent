@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getBackendUrl } from '@/lib/utils';
+import { fetchA2ABackend } from '@/lib/a2aBackendFetch';
 
 export async function POST(
   request: NextRequest,
@@ -10,20 +10,11 @@ export async function POST(
   try {
     const a2aRequest = await request.json();
 
-    const backendUrl = getBackendUrl();
-    const targetUrl = `${backendUrl}/a2a/${namespace}/${agentName}/`;
-
-    const backendResponse = await fetch(targetUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'User-Agent': 'kagent-ui',
-      },
-      body: JSON.stringify(a2aRequest),
-    });
+    const backendResponse = await fetchA2ABackend(
+      request,
+      `/a2a/${namespace}/${agentName}/`,
+      a2aRequest
+    );
 
     if (!backendResponse.ok) {
       const errorText = await backendResponse.text();

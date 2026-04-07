@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 	reconcilerutils "github.com/kagent-dev/kagent/go/core/internal/controller/reconciler/utils"
 	"github.com/kagent-dev/kagent/go/core/internal/controller/translator"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
 	"github.com/kagent-dev/kmcp/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,12 @@ var (
 	reconcileLog = ctrl.Log.WithName("reconciler")
 )
 
+// Reasons for Agent status condition type Ready.
+const (
+	AgentReadyReasonDeploymentReady = "DeploymentReady"
+	AgentReadyReasonWorkloadReady   = "WorkloadReady"
+)
+
 type KagentReconciler interface {
 	ReconcileKagentAgent(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentModelConfig(ctx context.Context, req ctrl.Request) error
@@ -62,6 +69,8 @@ type kagentReconciler struct {
 	// watchedNamespaces is the list of namespaces the controller watches.
 	// An empty list means watching all namespaces.
 	watchedNamespaces []string
+
+	sandboxBackend sandboxbackend.Backend
 }
 
 func NewKagentReconciler(
@@ -70,6 +79,7 @@ func NewKagentReconciler(
 	dbClient database.Client,
 	defaultModelConfig types.NamespacedName,
 	watchedNamespaces []string,
+	sandboxBackend sandboxbackend.Backend,
 ) KagentReconciler {
 	return &kagentReconciler{
 		adkTranslator:      translator,
@@ -77,6 +87,7 @@ func NewKagentReconciler(
 		dbClient:           dbClient,
 		defaultModelConfig: defaultModelConfig,
 		watchedNamespaces:  watchedNamespaces,
+		sandboxBackend:     sandboxBackend,
 	}
 }
 
@@ -161,25 +172,42 @@ func (a *kagentReconciler) reconcileAgentStatus(ctx context.Context, agent *v1al
 		ObservedGeneration: agent.Generation,
 	}
 
-	// Check if the deployment exists
-	deployment := &appsv1.Deployment{}
-	if err := a.kube.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, deployment); err != nil {
-		deployedCondition.Status = metav1.ConditionUnknown
-		deployedCondition.Reason = "DeploymentNotFound"
-		deployedCondition.Message = err.Error()
-	} else {
-		replicas := int32(1)
-		if deployment.Spec.Replicas != nil {
-			replicas = *deployment.Spec.Replicas
+	switch agent.Spec.Type {
+	case v1alpha2.AgentType_Sandbox:
+		if a.sandboxBackend == nil {
+			deployedCondition.Status = metav1.ConditionUnknown
+			deployedCondition.Reason = "SandboxBackendNotConfigured"
+			deployedCondition.Message = "Sandbox backend is not configured"
+			break
 		}
-		if deployment.Status.AvailableReplicas >= replicas {
-			deployedCondition.Status = metav1.ConditionTrue
-			deployedCondition.Reason = "DeploymentReady"
-			deployedCondition.Message = "Deployment is ready"
+		st, reason, msg := a.sandboxBackend.ComputeReady(ctx, a.kube, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name})
+		deployedCondition.Status = st
+		deployedCondition.Reason = reason
+		deployedCondition.Message = msg
+		if st == metav1.ConditionTrue {
+			deployedCondition.Reason = AgentReadyReasonWorkloadReady
+		}
+	default:
+		// Check if the deployment exists
+		deployment := &appsv1.Deployment{}
+		if err := a.kube.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, deployment); err != nil {
+			deployedCondition.Status = metav1.ConditionUnknown
+			deployedCondition.Reason = "DeploymentNotFound"
+			deployedCondition.Message = err.Error()
 		} else {
-			deployedCondition.Status = metav1.ConditionFalse
-			deployedCondition.Reason = "DeploymentNotReady"
-			deployedCondition.Message = fmt.Sprintf("Deployment is not ready, %d/%d pods are ready", deployment.Status.AvailableReplicas, replicas)
+			replicas := int32(1)
+			if deployment.Spec.Replicas != nil {
+				replicas = *deployment.Spec.Replicas
+			}
+			if deployment.Status.AvailableReplicas >= replicas {
+				deployedCondition.Status = metav1.ConditionTrue
+				deployedCondition.Reason = AgentReadyReasonDeploymentReady
+				deployedCondition.Message = "Deployment is ready"
+			} else {
+				deployedCondition.Status = metav1.ConditionFalse
+				deployedCondition.Reason = "DeploymentNotReady"
+				deployedCondition.Message = fmt.Sprintf("Deployment is not ready, %d/%d pods are ready", deployment.Status.AvailableReplicas, replicas)
+			}
 		}
 	}
 
@@ -523,11 +551,12 @@ func (a *kagentReconciler) reconcileRemoteMCPServerStatus(
 // controller. This prevents agents from referencing tools or agents in
 // namespaces that the controller cannot access.
 func (a *kagentReconciler) validateCrossNamespaceReferences(ctx context.Context, agent *v1alpha2.Agent) error {
-	if agent.Spec.Type != v1alpha2.AgentType_Declarative || agent.Spec.Declarative == nil {
+	decl := agent.Spec.EffectiveDeclarative()
+	if decl == nil {
 		return nil
 	}
 
-	for _, tool := range agent.Spec.Declarative.Tools {
+	for _, tool := range decl.Tools {
 		switch {
 		case tool.McpServer != nil:
 			if err := a.validateMcpServerReference(ctx, agent.Namespace, tool.McpServer); err != nil {
@@ -669,12 +698,13 @@ func (a *kagentReconciler) reconcileAgent(ctx context.Context, agent *v1alpha2.A
 // Returns a warning message if unsupported features are detected, empty string otherwise.
 // This implements soft validation - warns but doesn't fail reconciliation.
 func (a *kagentReconciler) validateRuntimeFeatures(agent *v1alpha2.Agent) string {
-	if agent.Spec.Declarative == nil {
+	decl := agent.Spec.EffectiveDeclarative()
+	if decl == nil {
 		return ""
 	}
 
 	// Get runtime (defaults to python)
-	runtime := agent.Spec.Declarative.Runtime
+	runtime := decl.Runtime
 	if runtime == "" {
 		runtime = v1alpha2.DeclarativeRuntime_Python
 	}
@@ -688,13 +718,13 @@ func (a *kagentReconciler) validateRuntimeFeatures(agent *v1alpha2.Agent) string
 	var unsupported []string
 
 	// ExecuteCodeBlocks: deprecated, not implementing in Go
-	if agent.Spec.Declarative.ExecuteCodeBlocks != nil && *agent.Spec.Declarative.ExecuteCodeBlocks {
+	if decl.ExecuteCodeBlocks != nil && *decl.ExecuteCodeBlocks {
 		unsupported = append(unsupported, "code execution (executeCodeBlocks is deprecated)")
 	}
 
 	// Memory: ✅ Supported in Go as of PR #1444
 	// Context compression: Not yet implemented in Go runtime
-	if agent.Spec.Declarative.Context != nil && agent.Spec.Declarative.Context.Compaction != nil {
+	if decl.Context != nil && decl.Context.Compaction != nil {
 		unsupported = append(unsupported, "context compression/compaction (not implemented in Go runtime)")
 	}
 

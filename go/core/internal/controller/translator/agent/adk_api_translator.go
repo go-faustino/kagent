@@ -26,6 +26,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/utils"
 	"github.com/kagent-dev/kagent/go/core/internal/version"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
 	"github.com/kagent-dev/kagent/go/core/pkg/translator"
 	"github.com/kagent-dev/kmcp/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -160,12 +161,13 @@ func getRuntimeProbeConfig(runtime v1alpha2.DeclarativeRuntime) probeConfig {
 
 type TranslatorPlugin = translator.TranslatorPlugin
 
-func NewAdkApiTranslator(kube client.Client, defaultModelConfig types.NamespacedName, plugins []TranslatorPlugin, globalProxyURL string) AdkApiTranslator {
+func NewAdkApiTranslator(kube client.Client, defaultModelConfig types.NamespacedName, plugins []TranslatorPlugin, globalProxyURL string, sandboxBackend sandboxbackend.Backend) AdkApiTranslator {
 	return &adkApiTranslator{
 		kube:               kube,
 		defaultModelConfig: defaultModelConfig,
 		plugins:            plugins,
 		globalProxyURL:     globalProxyURL,
+		sandboxBackend:     sandboxBackend,
 	}
 }
 
@@ -174,6 +176,7 @@ type adkApiTranslator struct {
 	defaultModelConfig types.NamespacedName
 	plugins            []TranslatorPlugin
 	globalProxyURL     string
+	sandboxBackend     sandboxbackend.Backend
 }
 
 const MAX_DEPTH = 10
@@ -216,12 +219,16 @@ func (a *adkApiTranslator) TranslateAgent(
 
 	switch agent.Spec.Type {
 	case v1alpha2.AgentType_Declarative:
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
+			return nil, fmt.Errorf("spec.declarative is required for Declarative agents")
+		}
 		var mdd *modelDeploymentData
 		cfg, mdd, secretHashBytes, err = a.translateInlineAgent(ctx, agent)
 		if err != nil {
 			return nil, err
 		}
-		dep, err = resolveInlineDeployment(agent, mdd)
+		dep, err = resolveInlineDeployment(agent, decl, mdd)
 		if err != nil {
 			return nil, err
 		}
@@ -229,6 +236,24 @@ func (a *adkApiTranslator) TranslateAgent(
 	case v1alpha2.AgentType_BYO:
 
 		dep, err = resolveByoDeployment(agent)
+		if err != nil {
+			return nil, err
+		}
+
+	case v1alpha2.AgentType_Sandbox:
+		if a.sandboxBackend == nil {
+			return nil, fmt.Errorf("AgentType Sandbox requires a sandbox backend to be configured")
+		}
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
+			return nil, fmt.Errorf("spec.sandbox.declarative is required for Sandbox agents")
+		}
+		var mdd *modelDeploymentData
+		cfg, mdd, secretHashBytes, err = a.translateInlineAgent(ctx, agent)
+		if err != nil {
+			return nil, err
+		}
+		dep, err = resolveInlineDeployment(agent, decl, mdd)
 		if err != nil {
 			return nil, err
 		}
@@ -258,6 +283,10 @@ func (r *adkApiTranslator) GetOwnedResourceTypes() []client.Object {
 		ownedResources = append(ownedResources, plugin.GetOwnedResourceTypes()...)
 	}
 
+	if r.sandboxBackend != nil {
+		ownedResources = append(ownedResources, r.sandboxBackend.GetOwnedResourceTypes()...)
+	}
+
 	return ownedResources
 }
 
@@ -272,12 +301,13 @@ func (a *adkApiTranslator) validateAgent(ctx context.Context, agent *v1alpha2.Ag
 		return fmt.Errorf("recursion limit reached in agent tool chain: %s -> %s", agentRef, agentRef)
 	}
 
-	if agent.Spec.Type != v1alpha2.AgentType_Declarative {
-		// We only need to validate loops in declarative agents
+	decl := agent.Spec.EffectiveDeclarative()
+	if decl == nil {
+		// We only validate tool DAG for declarative-style agents
 		return nil
 	}
 
-	for _, tool := range agent.Spec.Declarative.Tools {
+	for _, tool := range decl.Tools {
 		switch tool.Type {
 		case v1alpha2.ToolProviderType_Agent:
 			if tool.Agent == nil {
@@ -439,10 +469,10 @@ func (a *adkApiTranslator) buildManifest(
 	}
 	hasSkills := len(skills) > 0 || len(gitRefs) > 0
 
-	// Build Deployment
+	// Build workload pod (Deployment or pluggable Sandbox CRD)
 	volumes := append(secretVol, dep.Volumes...)
 	volumeMounts := append(secretMounts, dep.VolumeMounts...)
-	needSandbox := cfg != nil && cfg.GetExecuteCode()
+	needCodeExecIsolation := cfg != nil && cfg.GetExecuteCode()
 
 	var initContainers []corev1.Container
 
@@ -453,10 +483,10 @@ func (a *adkApiTranslator) buildManifest(
 			Value: "/skills",
 		}
 		// Skills use the BashTool which calls srt (Anthropic Sandbox Runtime) → bubblewrap.
-		// Mark that a sandbox is needed so Privileged is set when possible.
+		// Mark that code-exec isolation is needed so Privileged is set when possible.
 		// Exception: if the user explicitly set AllowPrivilegeEscalation=false (PSS Restricted),
 		// we respect their security context and let srt fall back to user-namespace sandboxing.
-		needSandbox = true
+		needCodeExecIsolation = true
 		volumes = append(volumes, corev1.Volume{
 			Name: "kagent-skills",
 			VolumeSource: corev1.VolumeSource{
@@ -534,73 +564,106 @@ func (a *adkApiTranslator) buildManifest(
 		// When the user explicitly sets AllowPrivilegeEscalation=false (PSS Restricted namespace),
 		// we respect their choice: srt will use unprivileged user-namespace sandboxing instead.
 		// On modern kernels (EKS, GKE) unprivileged_userns_clone is enabled by default.
-		if needSandbox && !allowPrivilegeEscalationExplicitlyFalse(securityContext) {
+		if needCodeExecIsolation && !allowPrivilegeEscalationExplicitlyFalse(securityContext) {
 			securityContext.Privileged = new(true)
 		}
-	} else if needSandbox {
-		// No user-provided securityContext: create one with Privileged for full sandbox
+	} else if needCodeExecIsolation {
+		// No user-provided securityContext: create one with Privileged for code execution
 		securityContext = &corev1.SecurityContext{
 			Privileged: new(true),
 		}
 	}
-	// If neither user-provided securityContext nor sandbox is needed, securityContext remains nil
+	// If neither user-provided securityContext nor code-exec isolation is needed, securityContext remains nil
 
 	// Determine runtime for probe configuration
 	runtime := v1alpha2.DeclarativeRuntime_Python
-	if agent.Spec.Type == v1alpha2.AgentType_Declarative && agent.Spec.Declarative.Runtime != "" {
-		runtime = agent.Spec.Declarative.Runtime
+	if decl := agent.Spec.EffectiveDeclarative(); decl != nil && decl.Runtime != "" {
+		runtime = decl.Runtime
 	}
 	probeConf := getRuntimeProbeConfig(runtime)
 
-	deployment := &appsv1.Deployment{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-		ObjectMeta: objMeta(),
-		Spec: appsv1.DeploymentSpec{
-			Replicas: dep.Replicas,
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
-					MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+	podTemplate := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: podLabels(), Annotations: podTemplateAnnotations},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: *dep.ServiceAccountName,
+			ImagePullSecrets:   dep.ImagePullSecrets,
+			SecurityContext:    dep.PodSecurityContext,
+			InitContainers:     initContainers,
+			Containers: []corev1.Container{{
+				Name:            "kagent",
+				Image:           dep.Image,
+				ImagePullPolicy: dep.ImagePullPolicy,
+				Command:         cmd,
+				Args:            dep.Args,
+				Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: dep.Port}},
+				Resources:       dep.Resources,
+				Env:             env,
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{Path: "/.well-known/agent-card.json", Port: intstr.FromString("http")},
+					},
+					InitialDelaySeconds: probeConf.InitialDelaySeconds,
+					TimeoutSeconds:      probeConf.TimeoutSeconds,
+					PeriodSeconds:       probeConf.PeriodSeconds,
 				},
-			},
-			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: podLabels(), Annotations: podTemplateAnnotations},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: *dep.ServiceAccountName,
-					ImagePullSecrets:   dep.ImagePullSecrets,
-					SecurityContext:    dep.PodSecurityContext,
-					InitContainers:     initContainers,
-					Containers: []corev1.Container{{
-						Name:            "kagent",
-						Image:           dep.Image,
-						ImagePullPolicy: dep.ImagePullPolicy,
-						Command:         cmd,
-						Args:            dep.Args,
-						Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: dep.Port}},
-						Resources:       dep.Resources,
-						Env:             env,
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								HTTPGet: &corev1.HTTPGetAction{Path: "/.well-known/agent-card.json", Port: intstr.FromString("http")},
-							},
-							InitialDelaySeconds: probeConf.InitialDelaySeconds,
-							TimeoutSeconds:      probeConf.TimeoutSeconds,
-							PeriodSeconds:       probeConf.PeriodSeconds,
-						},
-						SecurityContext: securityContext,
-						VolumeMounts:    volumeMounts,
-					}},
-					Volumes:      volumes,
-					Tolerations:  dep.Tolerations,
-					Affinity:     dep.Affinity,
-					NodeSelector: dep.NodeSelector,
-				},
-			},
+				SecurityContext: securityContext,
+				VolumeMounts:    volumeMounts,
+			}},
+			Volumes:      volumes,
+			Tolerations:  dep.Tolerations,
+			Affinity:     dep.Affinity,
+			NodeSelector: dep.NodeSelector,
 		},
 	}
-	outputs.Manifest = append(outputs.Manifest, deployment)
+
+	var workloadObj client.Object
+	switch agent.Spec.Type {
+	case v1alpha2.AgentType_Sandbox:
+		if a.sandboxBackend == nil {
+			return nil, fmt.Errorf("sandbox backend is not configured")
+		}
+		templateName := fmt.Sprintf("kagent-%s", agent.Name)
+		npm := agent.Spec.Sandbox.EffectiveSandboxNetworkPolicyManagement()
+		var netPol *v1alpha2.SandboxNetworkPolicySpec
+		if s := agent.Spec.Sandbox; s != nil {
+			netPol = s.NetworkPolicy
+		}
+		sbObjs, err := a.sandboxBackend.BuildSandbox(ctx, sandboxbackend.BuildInput{
+			Agent:                   agent,
+			PodTemplate:             podTemplate,
+			TemplateName:            templateName,
+			NetworkPolicyManagement: npm,
+			NetworkPolicy:           netPol,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build sandbox workload: %w", err)
+		}
+		for _, o := range sbObjs {
+			outputs.Manifest = append(outputs.Manifest, o)
+		}
+		workloadObj = nil
+	default:
+		deployment := &appsv1.Deployment{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+			ObjectMeta: objMeta(),
+			Spec: appsv1.DeploymentSpec{
+				Replicas: dep.Replicas,
+				Strategy: appsv1.DeploymentStrategy{
+					Type: appsv1.RollingUpdateDeploymentStrategyType,
+					RollingUpdate: &appsv1.RollingUpdateDeployment{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+						MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+					},
+				},
+				Selector: &metav1.LabelSelector{MatchLabels: selectorLabels},
+				Template: podTemplate,
+			},
+		}
+		workloadObj = deployment
+	}
+	if workloadObj != nil {
+		outputs.Manifest = append(outputs.Manifest, workloadObj)
+	}
 
 	// Service
 	outputs.Manifest = append(outputs.Manifest, &corev1.Service{
@@ -634,7 +697,12 @@ func (a *adkApiTranslator) buildManifest(
 }
 
 func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1alpha2.Agent) (*adk.AgentConfig, *modelDeploymentData, []byte, error) {
-	model, mdd, secretHashBytes, err := a.translateModel(ctx, agent.Namespace, agent.Spec.Declarative.ModelConfig)
+	decl := agent.Spec.EffectiveDeclarative()
+	if decl == nil {
+		return nil, nil, nil, fmt.Errorf("declarative configuration is required")
+	}
+
+	model, mdd, secretHashBytes, err := a.translateModel(ctx, agent.Namespace, decl.ModelConfig)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -649,16 +717,16 @@ func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1al
 		Description: agent.Spec.Description,
 		Instruction: rawSystemMessage,
 		Model:       model,
-		ExecuteCode: agent.Spec.Declarative.ExecuteCodeBlocks,
-		Stream:      new(agent.Spec.Declarative.Stream),
+		ExecuteCode: decl.ExecuteCodeBlocks,
+		Stream:      new(decl.Stream),
 	}
 
 	// Translate context management configuration
-	if agent.Spec.Declarative.Context != nil {
+	if decl.Context != nil {
 		contextCfg := &adk.AgentContextConfig{}
 
-		if agent.Spec.Declarative.Context.Compaction != nil {
-			comp := agent.Spec.Declarative.Context.Compaction
+		if decl.Context.Compaction != nil {
+			comp := decl.Context.Compaction
 			compCfg := &adk.AgentCompressionConfig{
 				CompactionInterval: comp.CompactionInterval,
 				OverlapSize:        comp.OverlapSize,
@@ -676,7 +744,7 @@ func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1al
 					summarizerModelName = *comp.Summarizer.ModelConfig
 				}
 
-				if summarizerModelName == "" || summarizerModelName == agent.Spec.Declarative.ModelConfig {
+				if summarizerModelName == "" || summarizerModelName == decl.ModelConfig {
 					compCfg.SummarizerModel = model
 				} else {
 					summarizerModel, summarizerMdd, summarizerSecretHash, err := a.translateModel(ctx, agent.Namespace, summarizerModelName)
@@ -698,24 +766,24 @@ func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1al
 	}
 
 	// Handle Memory Configuration: presence of Memory field enables it.
-	if agent.Spec.Declarative.Memory != nil {
-		embCfg, embMdd, embHash, err := a.translateEmbeddingConfig(ctx, agent.Namespace, agent.Spec.Declarative.Memory.ModelConfig)
+	if decl.Memory != nil {
+		embCfg, embMdd, embHash, err := a.translateEmbeddingConfig(ctx, agent.Namespace, decl.Memory.ModelConfig)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to resolve embedding config: %w", err)
 		}
 
 		cfg.Memory = &adk.MemoryConfig{
-			TTLDays:   agent.Spec.Declarative.Memory.TTLDays,
+			TTLDays:   decl.Memory.TTLDays,
 			Embedding: embCfg,
 		}
 
 		mergeDeploymentData(mdd, embMdd)
-		if agent.Spec.Declarative.Memory.ModelConfig != agent.Spec.Declarative.ModelConfig {
+		if decl.Memory.ModelConfig != decl.ModelConfig {
 			secretHashBytes = append(secretHashBytes, embHash...)
 		}
 	}
 
-	for _, tool := range agent.Spec.Declarative.Tools {
+	for _, tool := range decl.Tools {
 		headers, err := tool.ResolveHeaders(ctx, a.kube, agent.Namespace)
 		if err != nil {
 			return nil, nil, nil, err
@@ -743,7 +811,7 @@ func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1al
 			}
 
 			switch toolAgent.Spec.Type {
-			case v1alpha2.AgentType_BYO, v1alpha2.AgentType_Declarative:
+			case v1alpha2.AgentType_BYO, v1alpha2.AgentType_Declarative, v1alpha2.AgentType_Sandbox:
 				originalURL := fmt.Sprintf("http://%s.%s:8080", toolAgent.Name, toolAgent.Namespace)
 
 				// If proxy is configured, use proxy URL and set header for Gateway API routing
@@ -772,8 +840,8 @@ func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1al
 
 	// Apply prompt template processing after tools are translated, so tool names
 	// from the config are available as template variables.
-	if agent.Spec.Declarative.PromptTemplate != nil && len(agent.Spec.Declarative.PromptTemplate.DataSources) > 0 {
-		lookup, err := resolvePromptSources(ctx, a.kube, agent.Namespace, agent.Spec.Declarative.PromptTemplate.DataSources)
+	if decl.PromptTemplate != nil && len(decl.PromptTemplate.DataSources) > 0 {
+		lookup, err := resolvePromptSources(ctx, a.kube, agent.Namespace, decl.PromptTemplate.DataSources)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to resolve prompt sources: %w", err)
 		}
@@ -793,11 +861,15 @@ func (a *adkApiTranslator) translateInlineAgent(ctx context.Context, agent *v1al
 // resolveRawSystemMessage gets the raw system message string from the agent spec
 // without applying any template processing.
 func (a *adkApiTranslator) resolveRawSystemMessage(ctx context.Context, agent *v1alpha2.Agent) (string, error) {
-	if agent.Spec.Declarative.SystemMessageFrom != nil {
-		return agent.Spec.Declarative.SystemMessageFrom.Resolve(ctx, a.kube, agent.Namespace)
+	decl := agent.Spec.EffectiveDeclarative()
+	if decl == nil {
+		return "", fmt.Errorf("declarative configuration is required")
 	}
-	if agent.Spec.Declarative.SystemMessage != "" {
-		return agent.Spec.Declarative.SystemMessage, nil
+	if decl.SystemMessageFrom != nil {
+		return decl.SystemMessageFrom.Resolve(ctx, a.kube, agent.Namespace)
+	}
+	if decl.SystemMessage != "" {
+		return decl.SystemMessage, nil
 	}
 	return "", fmt.Errorf("at least one system message source (SystemMessage or SystemMessageFrom) must be specified")
 }

@@ -19,11 +19,13 @@ import SessionTokenStatsDisplay from "@/components/chat/TokenStats";
 import type { TokenStats, Session, ChatStatus, ToolDecision } from "@/types";
 import StatusDisplay from "./StatusDisplay";
 import { createSession, getSessionTasks, checkSessionExists } from "@/app/actions/sessions";
+import { waitForSandboxAgentReady } from "@/app/actions/agents";
 import { getCurrentUserId } from "@/app/actions/utils";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { createMessageHandlers, extractMessagesFromTasks, extractApprovalMessagesFromTasks, extractTokenStatsFromTasks, createMessage, ADKMetadata, ProcessedToolCallData } from "@/lib/messageHandlers";
 import { kagentA2AClient } from "@/lib/a2aClient";
+import { useChatAgentType } from "@/components/chat/ChatAgentContext";
 import { v4 as uuidv4 } from "uuid";
 import { getStatusPlaceholder } from "@/lib/statusUtils";
 import { Message, DataPart } from "@a2a-js/sdk";
@@ -36,6 +38,7 @@ interface ChatInterfaceProps {
 }
 
 export default function ChatInterface({ selectedAgentName, selectedNamespace, selectedSession, sessionId }: ChatInterfaceProps) {
+  const agentType = useChatAgentType();
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
   const [currentInputMessage, setCurrentInputMessage] = useState("");
@@ -279,6 +282,7 @@ export default function ChatInterface({ selectedAgentName, selectedNamespace, se
       await streamA2AMessage(a2aMessage, {
         errorLabel: "Streaming failed",
         onError: () => setCurrentInputMessage(userMessageText),
+        sessionIdForWait: currentSessionId,
       });
     } catch (error) {
       console.error("Error sending message or creating session:", error);
@@ -299,12 +303,37 @@ export default function ChatInterface({ selectedAgentName, selectedNamespace, se
       errorLabel?: string;
       onError?: () => void;
       onFinally?: () => void;
+      /** Session id for readiness polling when React state may lag. */
+      sessionIdForWait?: string;
     },
   ) => {
     abortControllerRef.current = new AbortController();
     isFirstAssistantChunkRef.current = true;
 
     try {
+      const sid = opts?.sessionIdForWait ?? session?.id ?? sessionId;
+      if (agentType === "Sandbox" && !sid) {
+        throw new Error("Session is required before messaging a Sandbox agent");
+      }
+      if (agentType === "Sandbox" && sid) {
+        let loadingToast: string | number | undefined;
+        const slowToast = setTimeout(() => {
+          loadingToast = toast.loading("Starting sandbox workload…");
+        }, 600);
+        try {
+          const ready = await waitForSandboxAgentReady(selectedAgentName, selectedNamespace);
+          clearTimeout(slowToast);
+          if (loadingToast !== undefined) toast.dismiss(loadingToast);
+          if (!ready.ok) {
+            throw new Error(ready.error ?? "Sandbox workload not ready");
+          }
+        } catch (waitErr) {
+          clearTimeout(slowToast);
+          if (loadingToast !== undefined) toast.dismiss(loadingToast);
+          throw waitErr;
+        }
+      }
+      isCreatingSessionRef.current = false;
       const sendParams = { message: a2aMessage, metadata: {} };
       const stream = await kagentA2AClient.sendMessageStream(
         selectedNamespace,
@@ -451,6 +480,7 @@ export default function ChatInterface({ selectedAgentName, selectedNamespace, se
 
     await streamA2AMessage(a2aMessage, {
       errorLabel: "Approval failed",
+      sessionIdForWait: currentSessionId,
       onFinally: () => {
         // Ensure chat state resets after approval stream ends
         setIsStreaming(false);
@@ -589,6 +619,7 @@ export default function ChatInterface({ selectedAgentName, selectedNamespace, se
 
     streamA2AMessage(a2aMessage, {
       errorLabel: "Ask user response failed",
+      sessionIdForWait: currentSessionId,
       onFinally: () => {
         setIsStreaming(false);
         setStreamingContent("");

@@ -37,7 +37,13 @@ export default function SessionsSidebar({
               <span className="ml-2 text-sm text-muted-foreground">Loading sessions...</span>
             </div>
           ) : (
-            <GroupedChats agentName={agentName} agentNamespace={agentNamespace} sessions={agentSessions} />
+            <GroupedChats
+              agentName={agentName}
+              agentNamespace={agentNamespace}
+              sessions={agentSessions}
+              hideNewChat={currentAgent.agent.spec.type === "Sandbox"}
+              hideSessionDelete={currentAgent.agent.spec.type === "Sandbox"}
+            />
           )}
         </ScrollArea>
       </SidebarContent>

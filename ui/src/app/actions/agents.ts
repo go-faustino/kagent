@@ -1,6 +1,7 @@
 "use server";
 
-import { AgentSpec, BaseResponse } from "@/types";
+import { AgentSpec, BaseResponse, DeclarativeAgentSpec, SandboxAgentSpec } from "@/types";
+import { buildSandboxNetworkPolicyPayload, isSandboxNetworkPolicySpecEmpty } from "@/lib/sandboxNetworkPolicy";
 import { Agent, AgentResponse, Tool } from "@/types";
 import { revalidatePath } from "next/cache";
 import { fetchApi, createErrorResponse } from "./utils";
@@ -137,6 +138,53 @@ function fromAgentFormDataToAgent(agentFormData: AgentFormData): Agent {
         serviceAccountName: trimmedSA,
       };
     }
+  } else if (type === "Sandbox") {
+    const decl: DeclarativeAgentSpec = {
+      systemMessage: agentFormData.systemPrompt || "",
+      modelConfig: modelConfigName || "",
+      stream: agentFormData.stream ?? true,
+      tools: convertTools(agentFormData.tools || []),
+    };
+
+    if (agentFormData.skillRefs && agentFormData.skillRefs.length > 0) {
+      base.spec!.skills = {
+        refs: agentFormData.skillRefs,
+      };
+    }
+
+    if (agentFormData.memory?.modelConfig) {
+      const memoryModel = agentFormData.memory.modelConfig;
+      const memoryModelName = k8sRefUtils.isValidRef(memoryModel)
+        ? k8sRefUtils.fromRef(memoryModel).name
+        : memoryModel;
+      decl.memory = {
+        modelConfig: memoryModelName,
+        ttlDays: agentFormData.memory.ttlDays,
+      };
+    }
+
+    if (agentFormData.context) {
+      decl.context = agentFormData.context;
+    }
+
+    const trimmedSA = agentFormData.serviceAccountName?.trim();
+    if (trimmedSA) {
+      decl.deployment = {
+        ...decl.deployment,
+        serviceAccountName: trimmedSA,
+      };
+    }
+
+    const sandboxSpec: SandboxAgentSpec = { declarative: decl };
+    const npm = agentFormData.sandboxNetworkPolicyManagement ?? "Unmanaged";
+    if (npm === "Managed") {
+      sandboxSpec.networkPolicyManagement = "Managed";
+      const payload = buildSandboxNetworkPolicyPayload(agentFormData.sandboxNetworkPolicy);
+      if (!isSandboxNetworkPolicySpecEmpty(payload)) {
+        sandboxSpec.networkPolicy = payload;
+      }
+    }
+    base.spec!.sandbox = sandboxSpec;
   } else if (type === "BYO") {
     base.spec!.byo = {
       deployment: {
@@ -166,6 +214,34 @@ export async function getAgent(agentName: string, namespace: string): Promise<Ba
   } catch (error) {
     return createErrorResponse<AgentResponse>(error, "Error getting agent");
   }
+}
+
+/**
+ * Polls GET /api/agents/{namespace}/{name} until deploymentReady is true (Sandbox: workload ready; same Ready condition as reconciler).
+ */
+export async function waitForSandboxAgentReady(
+  agentName: string,
+  namespace: string,
+  opts?: { timeoutMs?: number; intervalMs?: number }
+): Promise<{ ok: boolean; error?: string }> {
+  const timeoutMs = opts?.timeoutMs ?? 120_000;
+  const intervalMs = opts?.intervalMs ?? 1500;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const res = await getAgent(agentName, namespace);
+    if (!res.data) {
+      return { ok: false, error: res.message || "Agent not found" };
+    }
+    if (res.data.deploymentReady === true) {
+      return { ok: true };
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return {
+    ok: false,
+    error: "Timed out waiting for sandbox agent to become ready",
+  };
 }
 
 /**

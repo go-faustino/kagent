@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,12 +31,13 @@ import (
 )
 
 // AgentType represents the agent type
-// +kubebuilder:validation:Enum=Declarative;BYO
+// +kubebuilder:validation:Enum=Declarative;BYO;Sandbox
 type AgentType string
 
 const (
 	AgentType_Declarative AgentType = "Declarative"
 	AgentType_BYO         AgentType = "BYO"
+	AgentType_Sandbox     AgentType = "Sandbox"
 )
 
 // DeclarativeRuntime represents the runtime implementation for declarative agents
@@ -49,10 +51,10 @@ const (
 
 // AgentSpec defines the desired state of Agent.
 // +kubebuilder:validation:XValidation:message="type must be specified",rule="has(self.type)"
-// +kubebuilder:validation:XValidation:message="type must be either Declarative or BYO",rule="self.type == 'Declarative' || self.type == 'BYO'"
-// +kubebuilder:validation:XValidation:message="declarative must be specified if type is Declarative, or byo must be specified if type is BYO",rule="(self.type == 'Declarative' && has(self.declarative)) || (self.type == 'BYO' && has(self.byo))"
+// +kubebuilder:validation:XValidation:message="type must be Declarative, BYO, or Sandbox",rule="self.type == 'Declarative' || self.type == 'BYO' || self.type == 'Sandbox'"
+// +kubebuilder:validation:XValidation:message="declarative, byo, or sandbox must match type",rule="(self.type == 'Declarative' && has(self.declarative)) || (self.type == 'BYO' && has(self.byo)) || (self.type == 'Sandbox' && has(self.sandbox))"
 type AgentSpec struct {
-	// +kubebuilder:validation:Enum=Declarative;BYO
+	// +kubebuilder:validation:Enum=Declarative;BYO;Sandbox
 	// +kubebuilder:default=Declarative
 	Type AgentType `json:"type"`
 
@@ -60,6 +62,8 @@ type AgentSpec struct {
 	BYO *BYOAgentSpec `json:"byo,omitempty"`
 	// +optional
 	Declarative *DeclarativeAgentSpec `json:"declarative,omitempty"`
+	// +optional
+	Sandbox *SandboxAgentSpec `json:"sandbox,omitempty"`
 
 	// +optional
 	Description string `json:"description,omitempty"`
@@ -76,6 +80,72 @@ type AgentSpec struct {
 	// See: https://gateway-api.sigs.k8s.io/guides/multiple-ns/#cross-namespace-routing
 	// +optional
 	AllowedNamespaces *AllowedNamespaces `json:"allowedNamespaces,omitempty"`
+}
+
+// EffectiveDeclarative returns declarative configuration for agent types that use it (Declarative, Sandbox).
+func (s *AgentSpec) EffectiveDeclarative() *DeclarativeAgentSpec {
+	if s == nil {
+		return nil
+	}
+	switch s.Type {
+	case AgentType_Declarative:
+		return s.Declarative
+	case AgentType_Sandbox:
+		if s.Sandbox != nil {
+			d := s.Sandbox.Declarative
+			return &d
+		}
+	}
+	return nil
+}
+
+// SandboxNetworkPolicyManagement mirrors extensions.agents.x-k8s.io SandboxTemplate spec.networkPolicyManagement.
+// +kubebuilder:validation:Enum=Managed;Unmanaged
+type SandboxNetworkPolicyManagement string
+
+const (
+	// SandboxNetworkPolicyManagementManaged lets the agent-sandbox controller manage NetworkPolicies for the template (often router-only ingress).
+	SandboxNetworkPolicyManagementManaged SandboxNetworkPolicyManagement = "Managed"
+	// SandboxNetworkPolicyManagementUnmanaged skips those policies so arbitrary in-cluster access (e.g. kagent → Service) works.
+	SandboxNetworkPolicyManagementUnmanaged SandboxNetworkPolicyManagement = "Unmanaged"
+)
+
+// SandboxNetworkPolicySpec is the ingress/egress subset copied to SandboxTemplate.spec.networkPolicy
+// (extensions.agents.x-k8s.io). PodSelector and PolicyTypes are managed by the agent-sandbox controller.
+type SandboxNetworkPolicySpec struct {
+	// +optional
+	Ingress []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
+	// +optional
+	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
+}
+
+// SandboxAgentSpec configures an Agent whose workload is reconciled by a pluggable sandbox backend
+// (for example kubernetes-sigs/agent-sandbox). The nested declarative block matches AgentType_Declarative.
+// Sandbox-type agents are always provisioned via extensions.agents.x-k8s.io SandboxTemplate + SandboxClaim
+// (same translated pod as a declarative Deployment); the core Sandbox is created by the claim controller.
+type SandboxAgentSpec struct {
+	// Declarative holds model, tools, prompts, and related settings — same shape as spec.declarative for standard declarative agents.
+	// +kubebuilder:validation:Required
+	Declarative DeclarativeAgentSpec `json:"declarative"`
+
+	// NetworkPolicyManagement sets SandboxTemplate.spec.networkPolicyManagement (agent-sandbox extensions API).
+	// When empty, Unmanaged is used so kagent can reach the agent via in-cluster Service.
+	// +kubebuilder:validation:Enum=Managed;Unmanaged
+	// +optional
+	NetworkPolicyManagement SandboxNetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
+
+	// NetworkPolicy sets SandboxTemplate.spec.networkPolicy when NetworkPolicyManagement is Managed.
+	// When omitted, the agent-sandbox controller applies its secure default policy. Ignored when NetworkPolicyManagement is Unmanaged.
+	// +optional
+	NetworkPolicy *SandboxNetworkPolicySpec `json:"networkPolicy,omitempty"`
+}
+
+// EffectiveSandboxNetworkPolicyManagement returns Unmanaged when unset or empty.
+func (s *SandboxAgentSpec) EffectiveSandboxNetworkPolicyManagement() SandboxNetworkPolicyManagement {
+	if s == nil || s.NetworkPolicyManagement == "" {
+		return SandboxNetworkPolicyManagementUnmanaged
+	}
+	return s.NetworkPolicyManagement
 }
 
 // +kubebuilder:validation:AtLeastOneOf=refs,gitRefs

@@ -7,6 +7,7 @@ import (
 	"github.com/go-logr/logr"
 	api "github.com/kagent-dev/kagent/go/api/httpapi"
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
+	"github.com/kagent-dev/kagent/go/core/internal/controller/reconciler"
 	agent_translator "github.com/kagent-dev/kagent/go/core/internal/controller/translator/agent"
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/errors"
 	"github.com/kagent-dev/kagent/go/core/internal/utils"
@@ -65,9 +66,11 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 
 	deploymentReady := false
 	for _, condition := range agent.Status.Conditions {
-		if condition.Type == "Ready" && condition.Reason == "DeploymentReady" && condition.Status == "True" {
-			deploymentReady = true
-			break
+		if condition.Type == "Ready" && condition.Status == "True" {
+			if condition.Reason == reconciler.AgentReadyReasonDeploymentReady || condition.Reason == reconciler.AgentReadyReasonWorkloadReady {
+				deploymentReady = true
+				break
+			}
 		}
 	}
 
@@ -87,12 +90,12 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 		Accepted:        accepted,
 	}
 
-	if agent.Spec.Type == v1alpha2.AgentType_Declarative {
+	if decl := agent.Spec.EffectiveDeclarative(); decl != nil {
 		// Get the ModelConfig for the team
 		modelConfig := &v1alpha2.ModelConfig{}
 		objKey := client.ObjectKey{
 			Namespace: agent.Namespace,
-			Name:      agent.Spec.Declarative.ModelConfig,
+			Name:      decl.ModelConfig,
 		}
 		if err := h.KubeClient.Get(
 			ctx,
@@ -109,7 +112,7 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 		response.ModelProvider = modelConfig.Spec.Provider
 		response.Model = modelConfig.Spec.Model
 		response.ModelConfigRef = utils.GetObjectRef(modelConfig)
-		response.Tools = agent.Spec.Declarative.Tools
+		response.Tools = decl.Tools
 	}
 
 	return response, nil
@@ -201,6 +204,7 @@ func (h *AgentsHandler) HandleCreateAgent(w ErrorResponseWriter, r *http.Request
 		h.DefaultModelConfig,
 		nil,
 		h.ProxyURL,
+		h.SandboxBackend,
 	)
 
 	log.V(1).Info("Translating Agent to ADK format")

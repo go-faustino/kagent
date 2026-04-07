@@ -62,7 +62,7 @@ func TestRuntime_GoRuntime(t *testing.T) {
 		Namespace: "test",
 		Name:      "test-model",
 	}
-	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "")
+	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "", nil)
 
 	// Translate agent
 	result, err := translatorInstance.TranslateAgent(ctx, agent)
@@ -137,7 +137,7 @@ func TestRuntime_PythonRuntime(t *testing.T) {
 		Namespace: "test",
 		Name:      "test-model",
 	}
-	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "")
+	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "", nil)
 
 	// Translate agent
 	result, err := translatorInstance.TranslateAgent(ctx, agent)
@@ -212,7 +212,7 @@ func TestRuntime_DefaultToPython(t *testing.T) {
 		Namespace: "test",
 		Name:      "test-model",
 	}
-	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "")
+	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "", nil)
 
 	// Translate agent
 	result, err := translatorInstance.TranslateAgent(ctx, agent)
@@ -296,7 +296,7 @@ func TestRuntime_CustomRepositoryPath(t *testing.T) {
 		Namespace: "test",
 		Name:      "test-model",
 	}
-	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "")
+	translatorInstance := translator.NewAdkApiTranslator(kubeClient, defaultModel, nil, "", nil)
 
 	// Translate agent
 	result, err := translatorInstance.TranslateAgent(ctx, agent)

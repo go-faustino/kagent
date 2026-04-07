@@ -57,6 +57,15 @@ type AgentController struct {
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/finalizers,verbs=update
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates/finalizers,verbs=update
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims/finalizers,verbs=update
 
 func (r *AgentController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
@@ -203,12 +212,14 @@ func (r *AgentController) findAgentsUsingMCPServer(ctx context.Context, cl clien
 	}
 
 	var agents []*v1alpha2.Agent
-	for _, agent := range agentsList.Items {
-		if agent.Spec.Type != v1alpha2.AgentType_Declarative {
+	for i := range agentsList.Items {
+		agent := &agentsList.Items[i]
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
 			continue
 		}
 
-		for _, tool := range agent.Spec.Declarative.Tools {
+		for _, tool := range decl.Tools {
 			if tool.McpServer == nil {
 				continue
 			}
@@ -219,7 +230,7 @@ func (r *AgentController) findAgentsUsingMCPServer(ctx context.Context, cl clien
 
 			mcpServerRef := tool.McpServer.NamespacedName(agent.Namespace)
 			if mcpServerRef == obj {
-				agents = append(agents, &agent)
+				agents = append(agents, agent)
 			}
 		}
 	}
@@ -240,11 +251,12 @@ func (r *AgentController) findAgentsUsingRemoteMCPServer(ctx context.Context, cl
 	}
 
 	appendAgentIfUsesRemoteMCPServer := func(agent *v1alpha2.Agent) {
-		if agent.Spec.Type != v1alpha2.AgentType_Declarative {
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
 			return
 		}
 
-		for _, tool := range agent.Spec.Declarative.Tools {
+		for _, tool := range decl.Tools {
 			if tool.McpServer == nil {
 				return
 			}
@@ -276,12 +288,14 @@ func (r *AgentController) findAgentsUsingMCPService(ctx context.Context, cl clie
 	}
 
 	var agents []*v1alpha2.Agent
-	for _, agent := range agentsList.Items {
-		if agent.Spec.Type != v1alpha2.AgentType_Declarative {
+	for i := range agentsList.Items {
+		agent := &agentsList.Items[i]
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
 			continue
 		}
 
-		for _, tool := range agent.Spec.Declarative.Tools {
+		for _, tool := range decl.Tools {
 			if tool.McpServer == nil {
 				continue
 			}
@@ -292,7 +306,7 @@ func (r *AgentController) findAgentsUsingMCPService(ctx context.Context, cl clie
 
 			mcpServerRef := tool.McpServer.NamespacedName(agent.Namespace)
 			if mcpServerRef == obj {
-				agents = append(agents, &agent)
+				agents = append(agents, agent)
 			}
 		}
 	}
@@ -319,11 +333,12 @@ func (r *AgentController) findAgentsUsingModelConfig(ctx context.Context, cl cli
 			continue
 		}
 
-		if agent.Spec.Type != v1alpha2.AgentType_Declarative {
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
 			continue
 		}
 
-		if agent.Spec.Declarative.ModelConfig == obj.Name {
+		if decl.ModelConfig == obj.Name {
 			agents = append(agents, agent)
 		}
 	}
@@ -344,12 +359,13 @@ func (r *AgentController) findAgentsReferencingConfigMap(ctx context.Context, cl
 		if agent.Namespace != obj.Namespace {
 			continue
 		}
-		if agent.Spec.Type != v1alpha2.AgentType_Declarative || agent.Spec.Declarative == nil {
+		decl := agent.Spec.EffectiveDeclarative()
+		if decl == nil {
 			continue
 		}
 
 		// Check if systemMessageFrom references this ConfigMap.
-		if ref := agent.Spec.Declarative.SystemMessageFrom; ref != nil {
+		if ref := decl.SystemMessageFrom; ref != nil {
 			if ref.Type == v1alpha2.ConfigMapValueSource && ref.Name == obj.Name {
 				agents = append(agents, agent)
 				continue
@@ -357,7 +373,7 @@ func (r *AgentController) findAgentsReferencingConfigMap(ctx context.Context, cl
 		}
 
 		// Check if any promptTemplate dataSources reference this ConfigMap.
-		if pt := agent.Spec.Declarative.PromptTemplate; pt != nil {
+		if pt := decl.PromptTemplate; pt != nil {
 			for _, ds := range pt.DataSources {
 				if ds.Name == obj.Name {
 					agents = append(agents, agent)

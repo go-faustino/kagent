@@ -62,6 +62,25 @@
   - update
   - patch
   - delete
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes
+  verbs:
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxtemplates
+  - sandboxclaims
+  verbs:
+  - create
+  - update
+  - patch
+  - delete
 {{- end -}}
 
 {{- if .Values.rbac.clusterScoped }}

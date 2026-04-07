@@ -61,10 +61,11 @@ func (h *traceInjectHandler) Handle(ctx context.Context, client *http.Client, re
 // returns the corresponding gen_ai.provider.name attribute. Falls back to "kagent"
 // for BYO agents or if the ModelConfig cannot be fetched.
 func resolveProviderName(ctx context.Context, cache crcache.Cache, agent *v1alpha2.Agent) attribute.KeyValue {
-	if agent.Spec.Declarative == nil {
+	decl := agent.Spec.EffectiveDeclarative()
+	if decl == nil {
 		return semconv.GenAIProviderNameKey.String("kagent")
 	}
-	mcName := agent.Spec.Declarative.ModelConfig
+	mcName := decl.ModelConfig
 	if mcName == "" {
 		mcName = "default-model-config"
 	}

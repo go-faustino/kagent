@@ -105,7 +105,10 @@ func getRuntimeImageRepository(runtime v1alpha2.DeclarativeRuntime) string {
 	}
 }
 
-func resolveInlineDeployment(agent *v1alpha2.Agent, mdd *modelDeploymentData) (*resolvedDeployment, error) {
+func resolveInlineDeployment(agent *v1alpha2.Agent, decl *v1alpha2.DeclarativeAgentSpec, mdd *modelDeploymentData) (*resolvedDeployment, error) {
+	if decl == nil {
+		return nil, fmt.Errorf("declarative spec is required")
+	}
 	// Defaults
 	port := int32(8080)
 	args := []string{
@@ -121,14 +124,14 @@ func resolveInlineDeployment(agent *v1alpha2.Agent, mdd *modelDeploymentData) (*
 
 	// Start with spec deployment spec
 	spec := v1alpha2.DeclarativeDeploymentSpec{}
-	if agent.Spec.Declarative.Deployment != nil {
-		spec = *agent.Spec.Declarative.Deployment
+	if decl.Deployment != nil {
+		spec = *decl.Deployment
 	}
 
 	// Determine runtime (defaults to python if not set)
 	runtime := v1alpha2.DeclarativeRuntime_Python
-	if agent.Spec.Declarative.Runtime != "" {
-		runtime = agent.Spec.Declarative.Runtime
+	if decl.Runtime != "" {
+		runtime = decl.Runtime
 	}
 
 	// Get registry
