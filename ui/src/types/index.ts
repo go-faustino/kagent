@@ -237,79 +237,12 @@ export interface SkillForAgent {
   refs?: string[];
 }
 
-/** Mirrors agent-sandbox SandboxTemplate spec.networkPolicyManagement; omit for Unmanaged (kagent default). */
-export type SandboxNetworkPolicyManagement = "Managed" | "Unmanaged";
-
-// --- networking.k8s.io/v1 (subset used by NetworkPolicy ingress/egress rules) ---
-
-/** Same JSON shape as core.v1.Protocol. */
-export type KubernetesProtocol = "TCP" | "UDP" | "SCTP";
-
-/** IntOrString as in Kubernetes API (named port or numeric). */
-export type KubernetesIntOrString = string | number;
-
-export interface KubernetesLabelSelector {
-  matchLabels?: Record<string, string>;
-  matchExpressions?: KubernetesLabelSelectorRequirement[];
-}
-
-export type KubernetesLabelSelectorOperator =
-  | "In"
-  | "NotIn"
-  | "Exists"
-  | "DoesNotExist";
-
-export interface KubernetesLabelSelectorRequirement {
-  key: string;
-  operator: KubernetesLabelSelectorOperator;
-  values?: string[];
-}
-
-export interface KubernetesIPBlock {
-  cidr: string;
-  except?: string[];
-}
-
-/** networking.k8s.io/v1.NetworkPolicyPeer */
-export interface KubernetesNetworkPolicyPeer {
-  podSelector?: KubernetesLabelSelector;
-  namespaceSelector?: KubernetesLabelSelector;
-  ipBlock?: KubernetesIPBlock;
-}
-
-/** networking.k8s.io/v1.NetworkPolicyPort */
-export interface KubernetesNetworkPolicyPort {
-  protocol?: KubernetesProtocol;
-  port?: KubernetesIntOrString;
-  endPort?: number;
-}
-
-/** networking.k8s.io/v1.NetworkPolicyIngressRule */
-export interface KubernetesNetworkPolicyIngressRule {
-  from?: KubernetesNetworkPolicyPeer[];
-  ports?: KubernetesNetworkPolicyPort[];
-}
-
-/** networking.k8s.io/v1.NetworkPolicyEgressRule */
-export interface KubernetesNetworkPolicyEgressRule {
-  to?: KubernetesNetworkPolicyPeer[];
-  ports?: KubernetesNetworkPolicyPort[];
-}
-
 /**
- * Ingress/egress only (pod selector and policyTypes are owned by agent-sandbox).
- * Same shape as extensions.agents.x-k8s.io SandboxTemplate.spec.networkPolicy.
+ * Spec for a SandboxAgent: same declarative payload and optional metadata as a Declarative Agent (description, skills).
+ * Isolation comes from the SandboxAgent kind (SandboxTemplate + SandboxClaim), not from extra fields here.
  */
-export interface SandboxNetworkPolicySpec {
-  ingress?: KubernetesNetworkPolicyIngressRule[];
-  egress?: KubernetesNetworkPolicyEgressRule[];
-}
-
 export interface SandboxAgentSpec {
   declarative: DeclarativeAgentSpec;
-  networkPolicyManagement?: SandboxNetworkPolicyManagement;
-  /** When networkPolicyManagement is Managed; ignored when Unmanaged. */
-  networkPolicy?: SandboxNetworkPolicySpec;
   description?: string;
   skills?: SkillForAgent;
 }
@@ -540,7 +473,7 @@ export interface AgentMemory {
 // ---------------------------------------------------------------------------
 // HITL (Human-in-the-Loop) types
 //
-// These mirror the Python models in kagent-core/a2a/_hitl_utils.py and describe the 
+// These mirror the Python models in kagent-core/a2a/_hitl_utils.py and describe the
 // A2A - UI wire format for request and decision paths in HITL flow.
 // ---------------------------------------------------------------------------
 

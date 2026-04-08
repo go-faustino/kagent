@@ -623,17 +623,10 @@ func (a *adkApiTranslator) buildManifest(
 			return nil, fmt.Errorf("sandbox backend is not configured")
 		}
 		templateName := fmt.Sprintf("kagent-%s", agent.Name)
-		npm := agent.Spec.Sandbox.EffectiveSandboxNetworkPolicyManagement()
-		var netPol *v1alpha2.SandboxNetworkPolicySpec
-		if s := agent.Spec.Sandbox; s != nil {
-			netPol = s.NetworkPolicy
-		}
 		sbObjs, err := a.sandboxBackend.BuildSandbox(ctx, sandboxbackend.BuildInput{
-			Agent:                   agent,
-			PodTemplate:             podTemplate,
-			TemplateName:            templateName,
-			NetworkPolicyManagement: npm,
-			NetworkPolicy:           netPol,
+			Agent:        agent,
+			PodTemplate:  podTemplate,
+			TemplateName: templateName,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("build sandbox workload: %w", err)

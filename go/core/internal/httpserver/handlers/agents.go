@@ -12,6 +12,7 @@ import (
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/errors"
 	"github.com/kagent-dev/kagent/go/core/internal/utils"
 	"github.com/kagent-dev/kagent/go/core/pkg/auth"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -431,6 +432,13 @@ func (h *AgentsHandler) HandleCreateSandboxAgent(w ErrorResponseWriter, r *http.
 		return
 	}
 
+	if h.SandboxBackend != nil {
+		if err := sandboxbackend.EnsureAgentSandboxAPIsRegistered(r.Context(), h.KubeClient); err != nil {
+			w.RespondWithError(errors.NewBadRequestError(err.Error(), err))
+			return
+		}
+	}
+
 	kubeClientWrapper := utils.NewKubeClientWrapper(h.KubeClient)
 	if err := kubeClientWrapper.AddInMemory(&saReq); err != nil {
 		w.RespondWithError(errors.NewInternalServerError("Failed to add SandboxAgent to Kubernetes wrapper", err))
@@ -505,6 +513,13 @@ func (h *AgentsHandler) HandleUpdateSandboxAgent(w ErrorResponseWriter, r *http.
 	if err := Check(h.Authorizer, r, auth.Resource{Type: "Agent", Name: agentRef.String()}); err != nil {
 		w.RespondWithError(err)
 		return
+	}
+
+	if h.SandboxBackend != nil {
+		if err := sandboxbackend.EnsureAgentSandboxAPIsRegistered(r.Context(), h.KubeClient); err != nil {
+			w.RespondWithError(errors.NewBadRequestError(err.Error(), err))
+			return
+		}
 	}
 
 	existing := &v1alpha2.SandboxAgent{}

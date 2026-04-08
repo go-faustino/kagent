@@ -160,6 +160,12 @@ func (a *kagentReconciler) reassignManifestOwnershipToSandboxAgent(sa *v1alpha2.
 }
 
 func (a *kagentReconciler) reconcileSandboxAgent(ctx context.Context, sa *v1alpha2.SandboxAgent) error {
+	if a.sandboxBackend != nil {
+		if err := sandboxbackend.EnsureAgentSandboxAPIsRegistered(ctx, a.kube); err != nil {
+			return err
+		}
+	}
+
 	virtual := v1alpha2.VirtualAgentFromSandboxAgent(sa)
 	if err := a.validateCrossNamespaceReferences(ctx, virtual); err != nil {
 		return err

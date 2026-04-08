@@ -19,10 +19,6 @@ type BuildInput struct {
 
 	// TemplateName is the SandboxTemplate metadata.name (required).
 	TemplateName string
-	// NetworkPolicyManagement maps to SandboxTemplate.spec.networkPolicyManagement (Managed or Unmanaged).
-	NetworkPolicyManagement v1alpha2.SandboxNetworkPolicyManagement
-	// NetworkPolicy maps to SandboxTemplate.spec.networkPolicy when Management is Managed.
-	NetworkPolicy *v1alpha2.SandboxNetworkPolicySpec
 }
 
 // Backend builds sandbox CRD objects and evaluates their readiness.

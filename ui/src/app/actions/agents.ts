@@ -1,7 +1,6 @@
 "use server";
 
 import { AgentSpec, BaseResponse, DeclarativeAgentSpec, SandboxAgent, SandboxAgentSpec } from "@/types";
-import { buildSandboxNetworkPolicyPayload, isSandboxNetworkPolicySpecEmpty } from "@/lib/sandboxNetworkPolicy";
 import { Agent, AgentResponse, Tool } from "@/types";
 import { revalidatePath } from "next/cache";
 import { fetchApi, createErrorResponse } from "./utils";
@@ -271,15 +270,6 @@ function fromAgentFormDataToSandboxAgent(agentFormData: AgentFormData): SandboxA
     spec.skills = {
       refs: agentFormData.skillRefs,
     };
-  }
-
-  const npm = agentFormData.sandboxNetworkPolicyManagement ?? "Unmanaged";
-  if (npm === "Managed") {
-    spec.networkPolicyManagement = "Managed";
-    const payload = buildSandboxNetworkPolicyPayload(agentFormData.sandboxNetworkPolicy);
-    if (!isSandboxNetworkPolicySpecEmpty(payload)) {
-      spec.networkPolicy = payload;
-    }
   }
 
   return {

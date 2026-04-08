@@ -19,9 +19,7 @@ func VirtualAgentFromSandboxAgent(sa *SandboxAgent) *Agent {
 		Spec: AgentSpec{
 			Type: AgentType_Sandbox,
 			Sandbox: &SandboxAgentSpec{
-				Declarative:             sa.Spec.Declarative,
-				NetworkPolicyManagement: sa.Spec.NetworkPolicyManagement,
-				NetworkPolicy:           sa.Spec.NetworkPolicy,
+				Declarative: sa.Spec.Declarative,
 			},
 			Description:       sa.Spec.Description,
 			Skills:            sa.Spec.Skills,

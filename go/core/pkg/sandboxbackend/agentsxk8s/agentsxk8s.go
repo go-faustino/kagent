@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,16 +14,6 @@ import (
 	agentsandboxv1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
-
-func toExtensionsNetworkPolicy(np *v1alpha2.SandboxNetworkPolicySpec) *extensionsv1alpha1.NetworkPolicySpec {
-	if np == nil {
-		return nil
-	}
-	return &extensionsv1alpha1.NetworkPolicySpec{
-		Ingress: np.Ingress,
-		Egress:  np.Egress,
-	}
-}
 
 // Backend builds kubernetes-sigs/agent-sandbox SandboxTemplate + SandboxClaim resources.
 type Backend struct{}
@@ -77,13 +66,8 @@ func (b *Backend) buildSandboxTemplateAndClaim(in sandboxbackend.BuildInput, cla
 
 	tmplSpec := extensionsv1alpha1.SandboxTemplateSpec{
 		PodTemplate: pt,
-		NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagement(
-			in.NetworkPolicyManagement,
-		),
-	}
-	// extensions controller ignores networkPolicy when management is Unmanaged.
-	if in.NetworkPolicyManagement == v1alpha2.SandboxNetworkPolicyManagementManaged {
-		tmplSpec.NetworkPolicy = toExtensionsNetworkPolicy(in.NetworkPolicy)
+		// Unmanaged allows kagent to reach the agent Service in-cluster without agent-sandbox-managed NetworkPolicies.
+		NetworkPolicyManagement: extensionsv1alpha1.NetworkPolicyManagementUnmanaged,
 	}
 
 	st := &extensionsv1alpha1.SandboxTemplate{

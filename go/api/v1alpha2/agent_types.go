@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -105,44 +104,16 @@ func (s *AgentSpec) EffectiveDeclarative() *DeclarativeAgentSpec {
 	return nil
 }
 
-// SandboxNetworkPolicyManagement mirrors extensions.agents.x-k8s.io SandboxTemplate spec.networkPolicyManagement.
-// +kubebuilder:validation:Enum=Managed;Unmanaged
-type SandboxNetworkPolicyManagement string
-
-const (
-	// SandboxNetworkPolicyManagementManaged lets the agent-sandbox controller manage NetworkPolicies for the template (often router-only ingress).
-	SandboxNetworkPolicyManagementManaged SandboxNetworkPolicyManagement = "Managed"
-	// SandboxNetworkPolicyManagementUnmanaged skips those policies so arbitrary in-cluster access (e.g. kagent → Service) works.
-	SandboxNetworkPolicyManagementUnmanaged SandboxNetworkPolicyManagement = "Unmanaged"
-)
-
-// SandboxNetworkPolicySpec is the ingress/egress subset copied to SandboxTemplate.spec.networkPolicy
-// (extensions.agents.x-k8s.io). PodSelector and PolicyTypes are managed by the agent-sandbox controller.
-type SandboxNetworkPolicySpec struct {
-	// +optional
-	Ingress []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
-	// +optional
-	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
-}
-
-// SandboxAgentSpec is the spec of the SandboxAgent CRD (sandbox-isolated workload).
-// It is also embedded as spec.sandbox on synthetic Agent objects built for translation/API responses.
-// Workloads use extensions.agents.x-k8s.io SandboxTemplate + SandboxClaim.
+// SandboxAgentSpec is the desired configuration for a SandboxAgent.
+// Field-for-field it matches what you would put on a Declarative Agent (declarative block plus description, skills, allowedNamespaces).
+// There is no separate “sandbox settings” section here—isolation comes from the SandboxAgent kind and the controller using
+// SandboxTemplate + SandboxClaim. The translator always sets SandboxTemplate.spec.networkPolicyManagement to Unmanaged so
+// kagent can reach the workload in-cluster.
+// SandboxAgentSpec is also embedded as spec.sandbox on synthetic Agent objects used for translation/API responses.
 type SandboxAgentSpec struct {
 	// Declarative holds model, tools, prompts, and related settings — same shape as spec.declarative for standard declarative agents.
 	// +kubebuilder:validation:Required
 	Declarative DeclarativeAgentSpec `json:"declarative"`
-
-	// NetworkPolicyManagement sets SandboxTemplate.spec.networkPolicyManagement (agent-sandbox extensions API).
-	// When empty, Unmanaged is used so kagent can reach the agent via in-cluster Service.
-	// +kubebuilder:validation:Enum=Managed;Unmanaged
-	// +optional
-	NetworkPolicyManagement SandboxNetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
-
-	// NetworkPolicy sets SandboxTemplate.spec.networkPolicy when NetworkPolicyManagement is Managed.
-	// When omitted, the agent-sandbox controller applies its secure default policy. Ignored when NetworkPolicyManagement is Unmanaged.
-	// +optional
-	NetworkPolicy *SandboxNetworkPolicySpec `json:"networkPolicy,omitempty"`
 
 	// +optional
 	Description string `json:"description,omitempty"`
@@ -154,14 +125,6 @@ type SandboxAgentSpec struct {
 	// AllowedNamespaces defines which namespaces may reference this SandboxAgent as a tool (same semantics as Agent).
 	// +optional
 	AllowedNamespaces *AllowedNamespaces `json:"allowedNamespaces,omitempty"`
-}
-
-// EffectiveSandboxNetworkPolicyManagement returns Unmanaged when unset or empty.
-func (s *SandboxAgentSpec) EffectiveSandboxNetworkPolicyManagement() SandboxNetworkPolicyManagement {
-	if s == nil || s.NetworkPolicyManagement == "" {
-		return SandboxNetworkPolicyManagementUnmanaged
-	}
-	return s.NetworkPolicyManagement
 }
 
 // +kubebuilder:validation:AtLeastOneOf=refs,gitRefs

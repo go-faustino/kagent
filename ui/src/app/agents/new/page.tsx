@@ -4,9 +4,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Brain, Info, Loader2, Settings2, PlusCircle, Trash2, Layers, Shield } from "lucide-react";
-import { ModelConfig, AgentType, ContextConfig, SandboxNetworkPolicyManagement, SandboxNetworkPolicySpec } from "@/types";
-import { SandboxNetworkPolicySection } from "@/components/create/SandboxNetworkPolicySection";
+import { Brain, Info, Loader2, Settings2, PlusCircle, Trash2, Layers } from "lucide-react";
+import { ModelConfig, AgentType, ContextConfig } from "@/types";
 import { SystemPromptSection } from "@/components/create/SystemPromptSection";
 import { ModelSelectionSection } from "@/components/create/ModelSelectionSection";
 import { ToolsSection } from "@/components/create/ToolsSection";
@@ -38,7 +37,6 @@ interface ValidationErrors {
   memoryModel?: string;
   memoryTtl?: string;
   serviceAccountName?: string;
-  sandboxNetworkPolicy?: string;
 }
 
 interface AgentPageContentProps {
@@ -91,8 +89,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
     stream: boolean;
     contextConfig: ContextConfig | undefined;
     serviceAccountName: string;
-    sandboxNetworkPolicyManagement: SandboxNetworkPolicyManagement;
-    sandboxNetworkPolicy: SandboxNetworkPolicySpec;
     isSubmitting: boolean;
     isLoading: boolean;
     errors: ValidationErrors;
@@ -119,8 +115,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
     stream: false,
     contextConfig: undefined,
     serviceAccountName: "",
-    sandboxNetworkPolicyManagement: "Unmanaged",
-    sandboxNetworkPolicy: {},
     isSubmitting: false,
     isLoading: isEditMode,
     errors: {},
@@ -159,18 +153,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                 const memoryModelConfig = memorySpec?.modelConfig
                   ? `${agent.metadata.namespace}/${memorySpec.modelConfig}`
                   : "";
-                let sandboxNetworkPolicy: SandboxNetworkPolicySpec = {};
-                if (agent.spec.type === "Sandbox" && agent.spec.sandbox?.networkPolicy) {
-                  const np = agent.spec.sandbox.networkPolicy;
-                  try {
-                    sandboxNetworkPolicy = structuredClone(np) as SandboxNetworkPolicySpec;
-                  } catch {
-                    sandboxNetworkPolicy = {
-                      ...(np.ingress?.length ? { ingress: [...np.ingress] } : {}),
-                      ...(np.egress?.length ? { egress: [...np.egress] } : {}),
-                    };
-                  }
-                }
                 setState(prev => ({
                   ...prev,
                   ...baseUpdates,
@@ -186,12 +168,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                   byoImage: "",
                   byoCmd: "",
                   byoArgs: "",
-                  sandboxNetworkPolicyManagement:
-                    agent.spec.type === "Sandbox" &&
-                    agent.spec.sandbox?.networkPolicyManagement === "Managed"
-                      ? "Managed"
-                      : "Unmanaged",
-                  sandboxNetworkPolicy,
                 }));
               } else {
                 setState(prev => ({
@@ -202,8 +178,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                   selectedTools: [],
                   selectedMemoryModel: null,
                   memoryTtlDays: "",
-                  sandboxNetworkPolicyManagement: "Unmanaged",
-                  sandboxNetworkPolicy: {},
                   byoImage: agent.spec?.byo?.deployment?.image || "",
                   byoCmd: agent.spec?.byo?.deployment?.cmd || "",
                   byoArgs: (agent.spec?.byo?.deployment?.args || []).join(" "),
@@ -264,9 +238,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
         : undefined,
       context: state.contextConfig,
       serviceAccountName: state.serviceAccountName,
-      sandboxNetworkPolicyManagement:
-        state.agentType === "Sandbox" ? state.sandboxNetworkPolicyManagement : undefined,
-      sandboxNetworkPolicy: state.agentType === "Sandbox" ? state.sandboxNetworkPolicy : undefined,
     };
 
     const newErrors = validateAgentData(formData);
@@ -407,9 +378,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
           })
           .filter((e): e is EnvVar => e !== null),
         serviceAccountName: state.serviceAccountName.trim() || undefined,
-        sandboxNetworkPolicyManagement:
-          state.agentType === "Sandbox" ? state.sandboxNetworkPolicyManagement : undefined,
-        sandboxNetworkPolicy: state.agentType === "Sandbox" ? state.sandboxNetworkPolicy : undefined,
       };
 
       let result;
@@ -502,13 +470,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                       setState((prev) => ({
                         ...prev,
                         agentType: next,
-                        ...(next !== "Sandbox"
-                          ? {
-                              sandboxNetworkPolicyManagement: "Unmanaged",
-                              sandboxNetworkPolicy: {},
-                              errors: { ...prev.errors, sandboxNetworkPolicy: undefined },
-                            }
-                          : {}),
                       }));
                       validateField("type", val);
                     }}
@@ -755,38 +716,6 @@ function AgentPageContent({ isEditMode, agentName, agentNamespace }: AgentPageCo
                 )}
               </CardContent>
             </Card>
-            {state.agentType === "Sandbox" && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-xl font-bold">
-                    <Shield className="h-5 w-5 text-slate-500" />
-                    Sandbox network policy
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <SandboxNetworkPolicySection
-                    networkPolicyManagement={state.sandboxNetworkPolicyManagement}
-                    onNetworkPolicyManagementChange={(v) =>
-                      setState((prev) => ({
-                        ...prev,
-                        sandboxNetworkPolicyManagement: v,
-                        errors: { ...prev.errors, sandboxNetworkPolicy: undefined },
-                      }))
-                    }
-                    networkPolicy={state.sandboxNetworkPolicy}
-                    onNetworkPolicyChange={(v) =>
-                      setState((prev) => ({
-                        ...prev,
-                        sandboxNetworkPolicy: v,
-                        errors: { ...prev.errors, sandboxNetworkPolicy: undefined },
-                      }))
-                    }
-                    error={state.errors.sandboxNetworkPolicy}
-                    disabled={state.isSubmitting || state.isLoading}
-                  />
-                </CardContent>
-              </Card>
-            )}
             {usesDeclarativeUi(state.agentType) && (
               <>
                 <Card>
