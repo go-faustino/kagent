@@ -638,9 +638,7 @@ func (a *adkApiTranslator) buildManifest(
 		if err != nil {
 			return nil, fmt.Errorf("build sandbox workload: %w", err)
 		}
-		for _, o := range sbObjs {
-			outputs.Manifest = append(outputs.Manifest, o)
-		}
+		outputs.Manifest = append(outputs.Manifest, sbObjs...)
 		workloadObj = nil
 	default:
 		deployment := &appsv1.Deployment{

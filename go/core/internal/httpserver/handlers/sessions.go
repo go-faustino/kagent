@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -11,8 +12,9 @@ import (
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/internal/httpserver/errors"
 	"github.com/kagent-dev/kagent/go/core/internal/utils"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
@@ -24,6 +26,25 @@ type SessionsHandler struct {
 // NewSessionsHandler creates a new SessionsHandler
 func NewSessionsHandler(base *Base) *SessionsHandler {
 	return &SessionsHandler{Base: base}
+}
+
+func (h *SessionsHandler) isSandboxWorkload(ctx context.Context, namespace, name string) (bool, error) {
+	k8sAgent := &v1alpha2.Agent{}
+	err := h.KubeClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, k8sAgent)
+	if err == nil && k8sAgent.Spec.Type == v1alpha2.AgentType_Sandbox {
+		return true, nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return false, err
+	}
+	sa := &v1alpha2.SandboxAgent{}
+	if err := h.KubeClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // RunRequest represents a run creation request
@@ -135,8 +156,7 @@ func (h *SessionsHandler) HandleCreateSession(w ErrorResponseWriter, r *http.Req
 
 	nn, perr := utils.ParseRefString(*sessionRequest.AgentRef, "")
 	if perr == nil {
-		k8sAgent := &v1alpha2.Agent{}
-		if err := h.KubeClient.Get(r.Context(), client.ObjectKey{Namespace: nn.Namespace, Name: nn.Name}, k8sAgent); err == nil && k8sAgent.Spec.Type == v1alpha2.AgentType_Sandbox {
+		if isSandboxWorkload, err := h.isSandboxWorkload(r.Context(), nn.Namespace, nn.Name); err == nil && isSandboxWorkload {
 			existing, lerr := h.DatabaseService.ListSessionsForAgent(r.Context(), agent.ID, userID)
 			if lerr != nil {
 				w.RespondWithError(errors.NewInternalServerError("Failed to list sessions for agent", lerr))

@@ -35,6 +35,7 @@ const (
 	APIPathToolServers          = "/api/toolservers"
 	APIPathToolServerTypes      = "/api/toolservertypes"
 	APIPathAgents               = "/api/agents"
+	APIPathSandboxAgents        = "/api/sandboxagents"
 	APIPathModelProviderConfigs = "/api/modelproviderconfigs"
 	APIPathModels               = "/api/models"
 	APIPathMemories             = "/api/memories"
@@ -245,6 +246,9 @@ func (s *HTTPServer) setupRoutes() {
 	s.router.HandleFunc(APIPathAgents, adaptHandler(s.handlers.Agents.HandleUpdateAgent)).Methods(http.MethodPut)
 	s.router.HandleFunc(APIPathAgents+"/{namespace}/{name}", adaptHandler(s.handlers.Agents.HandleGetAgent)).Methods(http.MethodGet)
 	s.router.HandleFunc(APIPathAgents+"/{namespace}/{name}", adaptHandler(s.handlers.Agents.HandleDeleteAgent)).Methods(http.MethodDelete)
+
+	s.router.HandleFunc(APIPathSandboxAgents, adaptHandler(s.handlers.Agents.HandleCreateSandboxAgent)).Methods(http.MethodPost)
+	s.router.HandleFunc(APIPathSandboxAgents+"/{namespace}/{name}", adaptHandler(s.handlers.Agents.HandleUpdateSandboxAgent)).Methods(http.MethodPut)
 
 	// Model Provider Configs
 	s.router.HandleFunc(APIPathModelProviderConfigs+"/models", adaptHandler(s.handlers.ModelProviderConfig.HandleListSupportedModelProviders)).Methods(http.MethodGet)

@@ -43,6 +43,12 @@ func (h *AgentsHandler) HandleListAgents(w ErrorResponseWriter, r *http.Request)
 		return
 	}
 
+	sandboxAgentList := &v1alpha2.SandboxAgentList{}
+	if err := h.KubeClient.List(r.Context(), sandboxAgentList); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to list SandboxAgents from Kubernetes", err))
+		return
+	}
+
 	agentsWithID := make([]api.AgentResponse, 0)
 	for _, agent := range agentList.Items {
 		agentRef := utils.GetObjectRef(&agent)
@@ -52,6 +58,13 @@ func (h *AgentsHandler) HandleListAgents(w ErrorResponseWriter, r *http.Request)
 		// The getAgentResponse should return its reconciliation status in the agentResponse.
 		agentResponse, _ := h.getAgentResponse(r.Context(), log, &agent)
 
+		agentsWithID = append(agentsWithID, agentResponse)
+	}
+
+	for _, sa := range sandboxAgentList.Items {
+		agentRef := utils.GetObjectRef(&sa)
+		log.V(1).Info("Processing SandboxAgent", "agentRef", agentRef)
+		agentResponse, _ := h.getSandboxAgentResponse(r.Context(), log, &sa)
 		agentsWithID = append(agentsWithID, agentResponse)
 	}
 
@@ -118,6 +131,11 @@ func (h *AgentsHandler) getAgentResponse(ctx context.Context, log logr.Logger, a
 	return response, nil
 }
 
+func (h *AgentsHandler) getSandboxAgentResponse(ctx context.Context, log logr.Logger, sa *v1alpha2.SandboxAgent) (api.AgentResponse, error) {
+	virtual := v1alpha2.VirtualAgentFromSandboxAgent(sa)
+	return h.getAgentResponse(ctx, log, virtual)
+}
+
 // HandleGetAgent handles GET /api/agents/{namespace}/{name} requests using database
 func (h *AgentsHandler) HandleGetAgent(w ErrorResponseWriter, r *http.Request) {
 	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "get-db")
@@ -141,14 +159,31 @@ func (h *AgentsHandler) HandleGetAgent(w ErrorResponseWriter, r *http.Request) {
 		return
 	}
 	agent := &v1alpha2.Agent{}
-	if err := h.KubeClient.Get(
+	err = h.KubeClient.Get(
 		r.Context(),
 		client.ObjectKey{
 			Namespace: agentNamespace,
 			Name:      agentName,
 		},
 		agent,
-	); err != nil {
+	)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			sa := &v1alpha2.SandboxAgent{}
+			if err2 := h.KubeClient.Get(r.Context(), client.ObjectKey{Namespace: agentNamespace, Name: agentName}, sa); err2 != nil {
+				w.RespondWithError(errors.NewNotFoundError("Agent not found", err2))
+				return
+			}
+			agentResponse, err3 := h.getSandboxAgentResponse(r.Context(), log, sa)
+			if err3 != nil {
+				w.RespondWithError(err3)
+				return
+			}
+			log.Info("Successfully retrieved sandbox agent")
+			data := api.NewResponse(agentResponse, "Successfully retrieved agent", false)
+			RespondWithJSON(w, http.StatusOK, data)
+			return
+		}
 		w.RespondWithError(errors.NewNotFoundError("Agent not found", err))
 		return
 	}
@@ -173,6 +208,10 @@ func (h *AgentsHandler) HandleCreateAgent(w ErrorResponseWriter, r *http.Request
 		w.RespondWithError(errors.NewBadRequestError("Invalid request body", err))
 		return
 	}
+	if agentReq.Spec.Type == v1alpha2.AgentType_Sandbox {
+		w.RespondWithError(errors.NewBadRequestError("Sandbox workloads use the SandboxAgent API (POST /api/sandboxagents), not Agent with type Sandbox", nil))
+		return
+	}
 	if agentReq.Namespace == "" {
 		agentReq.Namespace = utils.GetResourceNamespace()
 		log.V(4).Info("Namespace not provided in request. Creating in controller installation namespace",
@@ -181,6 +220,7 @@ func (h *AgentsHandler) HandleCreateAgent(w ErrorResponseWriter, r *http.Request
 	agentRef, err := utils.ParseRefString(agentReq.Name, agentReq.Namespace)
 	if err != nil {
 		w.RespondWithError(errors.NewBadRequestError("Invalid agent metadata", err))
+		return
 	}
 
 	log = log.WithValues(
@@ -324,8 +364,25 @@ func (h *AgentsHandler) HandleDeleteAgent(w ErrorResponseWriter, r *http.Request
 	)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Info("Agent not found")
-			w.RespondWithError(errors.NewNotFoundError("Agent not found", nil))
+			sa := &v1alpha2.SandboxAgent{}
+			if err2 := h.KubeClient.Get(r.Context(), client.ObjectKey{Namespace: agentNamespace, Name: agentName}, sa); err2 != nil {
+				if apierrors.IsNotFound(err2) {
+					log.Info("Agent not found")
+					w.RespondWithError(errors.NewNotFoundError("Agent not found", nil))
+					return
+				}
+				log.Error(err2, "Failed to get SandboxAgent")
+				w.RespondWithError(errors.NewInternalServerError("Failed to get SandboxAgent", err2))
+				return
+			}
+			log.V(1).Info("Deleting SandboxAgent from Kubernetes")
+			if err := h.KubeClient.Delete(r.Context(), sa); err != nil {
+				w.RespondWithError(errors.NewInternalServerError("Failed to delete SandboxAgent", err))
+				return
+			}
+			log.Info("Successfully deleted sandbox agent")
+			data := api.NewResponse(struct{}{}, "Successfully deleted agent", false)
+			RespondWithJSON(w, http.StatusOK, data)
 			return
 		}
 		log.Error(err, "Failed to get Agent")
@@ -341,5 +398,158 @@ func (h *AgentsHandler) HandleDeleteAgent(w ErrorResponseWriter, r *http.Request
 
 	log.Info("Successfully deleted agent")
 	data := api.NewResponse(struct{}{}, "Successfully deleted agent", false)
+	RespondWithJSON(w, http.StatusOK, data)
+}
+
+// HandleCreateSandboxAgent handles POST /api/sandboxagents requests.
+func (h *AgentsHandler) HandleCreateSandboxAgent(w ErrorResponseWriter, r *http.Request) {
+	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "create-sandboxagent")
+
+	var saReq v1alpha2.SandboxAgent
+	if err := DecodeJSONBody(r, &saReq); err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Invalid request body", err))
+		return
+	}
+	if saReq.Namespace == "" {
+		saReq.Namespace = utils.GetResourceNamespace()
+		log.V(4).Info("Namespace not provided in request. Creating in controller installation namespace",
+			"namespace", saReq.Namespace)
+	}
+	agentRef, err := utils.ParseRefString(saReq.Name, saReq.Namespace)
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Invalid sandboxagent metadata", err))
+		return
+	}
+
+	log = log.WithValues(
+		"agentNamespace", agentRef.Namespace,
+		"agentName", agentRef.Name,
+	)
+
+	if err := Check(h.Authorizer, r, auth.Resource{Type: "Agent", Name: agentRef.String()}); err != nil {
+		w.RespondWithError(err)
+		return
+	}
+
+	kubeClientWrapper := utils.NewKubeClientWrapper(h.KubeClient)
+	if err := kubeClientWrapper.AddInMemory(&saReq); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to add SandboxAgent to Kubernetes wrapper", err))
+		return
+	}
+
+	apiTranslator := agent_translator.NewAdkApiTranslator(
+		kubeClientWrapper,
+		h.DefaultModelConfig,
+		nil,
+		h.ProxyURL,
+		h.SandboxBackend,
+	)
+
+	virtual := v1alpha2.VirtualAgentFromSandboxAgent(&saReq)
+	log.V(1).Info("Translating SandboxAgent to ADK format")
+	if _, err := apiTranslator.TranslateAgent(r.Context(), virtual); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to translate SandboxAgent to ADK format", err))
+		return
+	}
+
+	if err := h.KubeClient.Create(r.Context(), &saReq); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to create SandboxAgent in Kubernetes", err))
+		return
+	}
+
+	agentResponse, err := h.getSandboxAgentResponse(r.Context(), log, &saReq)
+	if err != nil {
+		w.RespondWithError(err)
+		return
+	}
+
+	log.Info("Successfully created sandbox agent", "agentRef", agentRef)
+	data := api.NewResponse(agentResponse, "Successfully created sandbox agent", false)
+	RespondWithJSON(w, http.StatusCreated, data)
+}
+
+// HandleUpdateSandboxAgent handles PUT /api/sandboxagents/{namespace}/{name} requests.
+func (h *AgentsHandler) HandleUpdateSandboxAgent(w ErrorResponseWriter, r *http.Request) {
+	log := ctrllog.FromContext(r.Context()).WithName("agents-handler").WithValues("operation", "update-sandboxagent")
+
+	var saReq v1alpha2.SandboxAgent
+	if err := DecodeJSONBody(r, &saReq); err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Invalid request body", err))
+		return
+	}
+	if saReq.Namespace == "" {
+		saReq.Namespace = utils.GetResourceNamespace()
+	}
+	agentRef, err := utils.ParseRefString(saReq.Name, saReq.Namespace)
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Invalid SandboxAgent metadata", err))
+		return
+	}
+
+	agentNamespace, err := GetPathParam(r, "namespace")
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Failed to get namespace from path", err))
+		return
+	}
+	agentName, err := GetPathParam(r, "name")
+	if err != nil {
+		w.RespondWithError(errors.NewBadRequestError("Failed to get name from path", err))
+		return
+	}
+
+	if agentRef.Namespace != agentNamespace || agentRef.Name != agentName {
+		w.RespondWithError(errors.NewBadRequestError("Path does not match request body metadata", nil))
+		return
+	}
+
+	if err := Check(h.Authorizer, r, auth.Resource{Type: "Agent", Name: agentRef.String()}); err != nil {
+		w.RespondWithError(err)
+		return
+	}
+
+	existing := &v1alpha2.SandboxAgent{}
+	if err := h.KubeClient.Get(r.Context(), agentRef, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			w.RespondWithError(errors.NewNotFoundError("SandboxAgent not found", nil))
+			return
+		}
+		w.RespondWithError(errors.NewInternalServerError("Failed to get SandboxAgent", err))
+		return
+	}
+
+	existing.Spec = saReq.Spec
+
+	kubeClientWrapper := utils.NewKubeClientWrapper(h.KubeClient)
+	if err := kubeClientWrapper.AddInMemory(existing); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to add SandboxAgent to Kubernetes wrapper", err))
+		return
+	}
+
+	apiTranslator := agent_translator.NewAdkApiTranslator(
+		kubeClientWrapper,
+		h.DefaultModelConfig,
+		nil,
+		h.ProxyURL,
+		h.SandboxBackend,
+	)
+	virtual := v1alpha2.VirtualAgentFromSandboxAgent(existing)
+	if _, err := apiTranslator.TranslateAgent(r.Context(), virtual); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to translate SandboxAgent to ADK format", err))
+		return
+	}
+
+	if err := h.KubeClient.Update(r.Context(), existing); err != nil {
+		w.RespondWithError(errors.NewInternalServerError("Failed to update SandboxAgent", err))
+		return
+	}
+
+	agentResponse, err := h.getSandboxAgentResponse(r.Context(), log, existing)
+	if err != nil {
+		w.RespondWithError(err)
+		return
+	}
+
+	log.Info("Successfully updated sandbox agent", "agentRef", agentRef)
+	data := api.NewResponse(agentResponse, "Successfully updated sandbox agent", false)
 	RespondWithJSON(w, http.StatusOK, data)
 }

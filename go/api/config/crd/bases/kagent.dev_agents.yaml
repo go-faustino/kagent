@@ -10168,11 +10168,78 @@ spec:
                 type: string
               sandbox:
                 description: |-
-                  SandboxAgentSpec configures an Agent whose workload is reconciled by a pluggable sandbox backend
-                  (for example kubernetes-sigs/agent-sandbox). The nested declarative block matches AgentType_Declarative.
-                  Sandbox-type agents are always provisioned via extensions.agents.x-k8s.io SandboxTemplate + SandboxClaim
-                  (same translated pod as a declarative Deployment); the core Sandbox is created by the claim controller.
+                  Sandbox is only populated on synthetic Agent objects used for translation and API responses (from SandboxAgent).
+                  Do not set this on persisted Agent resources; use the SandboxAgent CRD instead.
                 properties:
+                  allowedNamespaces:
+                    description: AllowedNamespaces defines which namespaces may reference
+                      this SandboxAgent as a tool (same semantics as Agent).
+                    properties:
+                      from:
+                        default: Same
+                        description: |-
+                          From indicates where references to this resource can originate.
+                          Possible values are:
+                          * All: References from all namespaces are allowed.
+                          * Same: Only references from the same namespace are allowed (default).
+                          * Selector: References from namespaces matching the selector are allowed.
+                        enum:
+                        - All
+                        - Same
+                        - Selector
+                        type: string
+                      selector:
+                        description: |-
+                          Selector is a label selector for namespaces that are allowed to reference this resource.
+                          Only used when From is set to "Selector".
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
+                            items:
+                              description: |-
+                                A label selector requirement is a selector that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: |-
+                                    operator represents a key's relationship to a set of values.
+                                    Valid operators are In, NotIn, Exists and DoesNotExist.
+                                  type: string
+                                values:
+                                  description: |-
+                                    values is an array of string values. If the operator is In or NotIn,
+                                    the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                    the values array must be empty. This array is replaced during a strategic
+                                    merge patch.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                              map is equivalent to an element of matchExpressions, whose key field is "key", the
+                              operator is "In", and the values array contains only "value". The requirements are ANDed.
+                            type: object
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    type: object
+                    x-kubernetes-validations:
+                    - message: selector must be specified when from is Selector
+                      rule: '!(self.from == ''Selector'' && !has(self.selector))'
                   declarative:
                     description: Declarative holds model, tools, prompts, and related
                       settings — same shape as spec.declarative for standard declarative
@@ -14227,6 +14294,8 @@ spec:
                     x-kubernetes-validations:
                     - message: systemMessage and systemMessageFrom are mutually exclusive
                       rule: '!has(self.systemMessage) || !has(self.systemMessageFrom)'
+                  description:
+                    type: string
                   networkPolicy:
                     description: |-
                       NetworkPolicy sets SandboxTemplate.spec.networkPolicy when NetworkPolicyManagement is Managed.
@@ -14622,6 +14691,294 @@ spec:
                       NetworkPolicyManagement sets SandboxTemplate.spec.networkPolicyManagement (agent-sandbox extensions API).
                       When empty, Unmanaged is used so kagent can reach the agent via in-cluster Service.
                     type: string
+                  skills:
+                    description: Skills to load into the agent (same semantics as
+                      Agent.spec.skills).
+                    properties:
+                      gitAuthSecretRef:
+                        description: |-
+                          Reference to a Secret containing git credentials.
+                          Applied to all gitRefs entries.
+                          The secret should contain a `token` key for HTTPS auth,
+                          or `ssh-privatekey` for SSH auth.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      gitRefs:
+                        description: Git repositories to fetch skills from.
+                        items:
+                          description: GitRepo specifies a single Git repository to
+                            fetch skills from.
+                          properties:
+                            name:
+                              description: Name for the skill directory under /skills.
+                                Defaults to the repo name.
+                              type: string
+                            path:
+                              description: Subdirectory within the repo to use as
+                                the skill root.
+                              type: string
+                            ref:
+                              default: main
+                              description: 'Git reference: branch name, tag, or commit
+                                SHA.'
+                              type: string
+                            url:
+                              description: URL of the git repository (HTTPS or SSH).
+                              type: string
+                          required:
+                          - url
+                          type: object
+                        maxItems: 20
+                        minItems: 1
+                        type: array
+                      initContainer:
+                        description: Configuration for the skills-init init container.
+                        properties:
+                          env:
+                            description: Additional environment variables for the
+                              skills-init init container.
+                            items:
+                              description: EnvVar represents an environment variable
+                                present in a Container.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name of the environment variable.
+                                    May consist of any printable ASCII characters except '='.
+                                  type: string
+                                value:
+                                  description: |-
+                                    Variable references $(VAR_NAME) are expanded
+                                    using the previously defined environment variables in the container and
+                                    any service environment variables. If a variable cannot be resolved,
+                                    the reference in the input string will be unchanged. Double $$ are reduced
+                                    to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                                    "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                                    Escaped references will never be expanded, regardless of whether the variable
+                                    exists or not.
+                                    Defaults to "".
+                                  type: string
+                                valueFrom:
+                                  description: Source for the environment variable's
+                                    value. Cannot be used if value is not empty.
+                                  properties:
+                                    configMapKeyRef:
+                                      description: Selects a key of a ConfigMap.
+                                      properties:
+                                        key:
+                                          description: The key to select.
+                                          type: string
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                        optional:
+                                          description: Specify whether the ConfigMap
+                                            or its key must be defined
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    fieldRef:
+                                      description: |-
+                                        Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                        spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                                      properties:
+                                        apiVersion:
+                                          description: Version of the schema the FieldPath
+                                            is written in terms of, defaults to "v1".
+                                          type: string
+                                        fieldPath:
+                                          description: Path of the field to select
+                                            in the specified API version.
+                                          type: string
+                                      required:
+                                      - fieldPath
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    fileKeyRef:
+                                      description: |-
+                                        FileKeyRef selects a key of the env file.
+                                        Requires the EnvFiles feature gate to be enabled.
+                                      properties:
+                                        key:
+                                          description: |-
+                                            The key within the env file. An invalid key will prevent the pod from starting.
+                                            The keys defined within a source may consist of any printable ASCII characters except '='.
+                                            During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                          type: string
+                                        optional:
+                                          default: false
+                                          description: |-
+                                            Specify whether the file or its key must be defined. If the file or key
+                                            does not exist, then the env var is not published.
+                                            If optional is set to true and the specified key does not exist,
+                                            the environment variable will not be set in the Pod's containers.
+
+                                            If optional is set to false and the specified key does not exist,
+                                            an error will be returned during Pod creation.
+                                          type: boolean
+                                        path:
+                                          description: |-
+                                            The path within the volume from which to select the file.
+                                            Must be relative and may not contain the '..' path or start with '..'.
+                                          type: string
+                                        volumeName:
+                                          description: The name of the volume mount
+                                            containing the env file.
+                                          type: string
+                                      required:
+                                      - key
+                                      - path
+                                      - volumeName
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    resourceFieldRef:
+                                      description: |-
+                                        Selects a resource of the container: only resources limits and requests
+                                        (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                                      properties:
+                                        containerName:
+                                          description: 'Container name: required for
+                                            volumes, optional for env vars'
+                                          type: string
+                                        divisor:
+                                          anyOf:
+                                          - type: integer
+                                          - type: string
+                                          description: Specifies the output format
+                                            of the exposed resources, defaults to
+                                            "1"
+                                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                          x-kubernetes-int-or-string: true
+                                        resource:
+                                          description: 'Required: resource to select'
+                                          type: string
+                                      required:
+                                      - resource
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    secretKeyRef:
+                                      description: Selects a key of a secret in the
+                                        pod's namespace
+                                      properties:
+                                        key:
+                                          description: The key of the secret to select
+                                            from.  Must be a valid secret key.
+                                          type: string
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                        optional:
+                                          description: Specify whether the Secret
+                                            or its key must be defined
+                                          type: boolean
+                                      required:
+                                      - key
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                  type: object
+                              required:
+                              - name
+                              type: object
+                            type: array
+                          resources:
+                            description: Resource requirements for the skills-init
+                              init container.
+                            properties:
+                              claims:
+                                description: |-
+                                  Claims lists the names of resources, defined in spec.resourceClaims,
+                                  that are used by this container.
+
+                                  This field depends on the
+                                  DynamicResourceAllocation feature gate.
+
+                                  This field is immutable. It can only be set for containers.
+                                items:
+                                  description: ResourceClaim references one entry
+                                    in PodSpec.ResourceClaims.
+                                  properties:
+                                    name:
+                                      description: |-
+                                        Name must match the name of one entry in pod.spec.resourceClaims of
+                                        the Pod where this field is used. It makes that resource available
+                                        inside a container.
+                                      type: string
+                                    request:
+                                      description: |-
+                                        Request is the name chosen for a request in the referenced claim.
+                                        If empty, everything from the claim is made available, otherwise
+                                        only the result of this request.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                - name
+                                x-kubernetes-list-type: map
+                              limits:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Limits describes the maximum amount of compute resources allowed.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                              requests:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Requests describes the minimum amount of compute resources required.
+                                  If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                  otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                            type: object
+                        type: object
+                      insecureSkipVerify:
+                        description: |-
+                          Fetch images insecurely from registries (allowing HTTP and skipping TLS verification).
+                          Meant for development and testing purposes only.
+                        type: boolean
+                      refs:
+                        description: The list of skill images to fetch.
+                        items:
+                          type: string
+                        maxItems: 20
+                        minItems: 1
+                        type: array
+                    type: object
                 required:
                 - declarative
                 type: object
@@ -14917,13 +15274,13 @@ spec:
                 - enum:
                   - Declarative
                   - BYO
-                  - Sandbox
                 - enum:
                   - Declarative
                   - BYO
-                  - Sandbox
                 default: Declarative
-                description: AgentType represents the agent type
+                description: |-
+                  AgentType represents the agent type (Agent CRD only: Declarative or BYO).
+                  AgentType_Sandbox is retained for synthetic Agent objects produced from SandboxAgent (translator/API).
                 type: string
             required:
             - type
@@ -14931,12 +15288,13 @@ spec:
             x-kubernetes-validations:
             - message: type must be specified
               rule: has(self.type)
-            - message: type must be Declarative, BYO, or Sandbox
-              rule: self.type == 'Declarative' || self.type == 'BYO' || self.type
-                == 'Sandbox'
-            - message: declarative, byo, or sandbox must match type
+            - message: type must be Declarative or BYO
+              rule: self.type == 'Declarative' || self.type == 'BYO'
+            - message: declarative or byo must match type
               rule: (self.type == 'Declarative' && has(self.declarative)) || (self.type
-                == 'BYO' && has(self.byo)) || (self.type == 'Sandbox' && has(self.sandbox))
+                == 'BYO' && has(self.byo))
+            - message: sandbox belongs on SandboxAgent CRD, not Agent
+              rule: '!has(self.sandbox)'
           status:
             description: AgentStatus defines the observed state of Agent.
             properties:

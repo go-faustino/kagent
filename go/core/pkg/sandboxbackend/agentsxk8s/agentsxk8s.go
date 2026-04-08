@@ -3,6 +3,7 @@ package agentsxk8s
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend"
@@ -126,9 +127,7 @@ func mapsUnion(podLabels map[string]string, agentLabels map[string]string) map[s
 		return nil
 	}
 	out := make(map[string]string, len(podLabels)+len(agentLabels))
-	for k, v := range podLabels {
-		out[k] = v
-	}
+	maps.Copy(out, podLabels)
 	for k, v := range agentLabels {
 		if _, ok := out[k]; !ok {
 			out[k] = v

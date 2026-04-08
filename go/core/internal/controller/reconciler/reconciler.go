@@ -49,6 +49,7 @@ const (
 
 type KagentReconciler interface {
 	ReconcileKagentAgent(ctx context.Context, req ctrl.Request) error
+	ReconcileKagentSandboxAgent(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentModelConfig(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentRemoteMCPServer(ctx context.Context, req ctrl.Request) error
 	ReconcileKagentMCPService(ctx context.Context, req ctrl.Request) error
@@ -121,6 +122,153 @@ func (a *kagentReconciler) handleAgentDeletion(ctx context.Context, req ctrl.Req
 	return nil
 }
 
+func (a *kagentReconciler) ReconcileKagentSandboxAgent(ctx context.Context, req ctrl.Request) error {
+	sa := &v1alpha2.SandboxAgent{}
+	if err := a.kube.Get(ctx, req.NamespacedName, sa); err != nil {
+		if apierrors.IsNotFound(err) {
+			return a.handleSandboxAgentDeletion(ctx, req)
+		}
+		return fmt.Errorf("failed to get sandboxagent %s: %w", req.NamespacedName, err)
+	}
+
+	err := a.reconcileSandboxAgent(ctx, sa)
+	if err != nil {
+		reconcileLog.Error(err, "failed to reconcile sandboxagent", "sandboxagent", req.NamespacedName)
+	}
+
+	return a.reconcileSandboxAgentStatus(ctx, sa, err)
+}
+
+func (a *kagentReconciler) handleSandboxAgentDeletion(ctx context.Context, req ctrl.Request) error {
+	id := utils.ConvertToPythonIdentifier(req.String())
+	if err := a.dbClient.DeleteAgent(ctx, id); err != nil {
+		return fmt.Errorf("failed to delete sandbox agent %s from db: %w", req.String(), err)
+	}
+
+	reconcileLog.Info("SandboxAgent was deleted", "namespace", req.Namespace, "name", req.Name)
+	return nil
+}
+
+func (a *kagentReconciler) reassignManifestOwnershipToSandboxAgent(sa *v1alpha2.SandboxAgent, manifest []client.Object) error {
+	for _, obj := range manifest {
+		obj.SetOwnerReferences(nil)
+		if err := controllerutil.SetControllerReference(sa, obj, a.kube.Scheme()); err != nil {
+			return fmt.Errorf("set controller reference for %s %s/%s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetNamespace(), obj.GetName(), err)
+		}
+	}
+	return nil
+}
+
+func (a *kagentReconciler) reconcileSandboxAgent(ctx context.Context, sa *v1alpha2.SandboxAgent) error {
+	virtual := v1alpha2.VirtualAgentFromSandboxAgent(sa)
+	if err := a.validateCrossNamespaceReferences(ctx, virtual); err != nil {
+		return err
+	}
+
+	agentOutputs, err := a.adkTranslator.TranslateAgent(ctx, virtual)
+	if err != nil {
+		return fmt.Errorf("failed to translate sandboxagent %s/%s: %w", sa.Namespace, sa.Name, err)
+	}
+
+	if err := a.reassignManifestOwnershipToSandboxAgent(sa, agentOutputs.Manifest); err != nil {
+		return err
+	}
+
+	ownedObjects, err := reconcilerutils.FindOwnedObjects(ctx, a.kube, sa.UID, sa.Namespace, a.adkTranslator.GetOwnedResourceTypes())
+	if err != nil {
+		return err
+	}
+
+	if err := a.reconcileDesiredObjects(ctx, sa, agentOutputs.Manifest, ownedObjects); err != nil {
+		return fmt.Errorf("failed to reconcile owned objects: %w", err)
+	}
+
+	if err := a.resyncAgentSandboxWorkload(ctx, sa); err != nil {
+		return err
+	}
+
+	if err := a.upsertAgent(ctx, virtual, agentOutputs); err != nil {
+		return fmt.Errorf("failed to upsert agent %s/%s: %w", sa.Namespace, sa.Name, err)
+	}
+
+	return nil
+}
+
+func (a *kagentReconciler) reconcileSandboxAgentStatus(ctx context.Context, sa *v1alpha2.SandboxAgent, reconcileErr error) error {
+	virtual := v1alpha2.VirtualAgentFromSandboxAgent(sa)
+	var (
+		status  metav1.ConditionStatus
+		message string
+		reason  string
+	)
+	if reconcileErr != nil {
+		status = metav1.ConditionFalse
+		message = reconcileErr.Error()
+		reason = "ReconcileFailed"
+	} else {
+		status = metav1.ConditionTrue
+		reason = "Reconciled"
+		message = "SandboxAgent configuration accepted"
+	}
+
+	conditionChanged := meta.SetStatusCondition(&sa.Status.Conditions, metav1.Condition{
+		Type:               v1alpha2.AgentConditionTypeAccepted,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: sa.Generation,
+	})
+
+	if warning := a.validateRuntimeFeatures(virtual); warning != "" {
+		conditionChanged = conditionChanged || meta.SetStatusCondition(&sa.Status.Conditions, metav1.Condition{
+			Type:               v1alpha2.AgentConditionTypeUnsupportedFeatures,
+			Status:             metav1.ConditionTrue,
+			Reason:             "UnsupportedFeatures",
+			Message:            warning,
+			ObservedGeneration: sa.Generation,
+		})
+	} else {
+		for i, cond := range sa.Status.Conditions {
+			if cond.Type == v1alpha2.AgentConditionTypeUnsupportedFeatures && cond.Reason == "UnsupportedFeatures" {
+				sa.Status.Conditions = append(sa.Status.Conditions[:i], sa.Status.Conditions[i+1:]...)
+				conditionChanged = true
+				break
+			}
+		}
+	}
+
+	deployedCondition := metav1.Condition{
+		Type:               v1alpha2.AgentConditionTypeReady,
+		Status:             metav1.ConditionUnknown,
+		ObservedGeneration: sa.Generation,
+	}
+
+	if a.sandboxBackend == nil {
+		deployedCondition.Status = metav1.ConditionUnknown
+		deployedCondition.Reason = "SandboxBackendNotConfigured"
+		deployedCondition.Message = "Sandbox backend is not configured"
+	} else {
+		st, reason, msg := a.sandboxBackend.ComputeReady(ctx, a.kube, types.NamespacedName{Namespace: sa.Namespace, Name: sa.Name})
+		deployedCondition.Status = st
+		deployedCondition.Reason = reason
+		deployedCondition.Message = msg
+		if st == metav1.ConditionTrue {
+			deployedCondition.Reason = AgentReadyReasonWorkloadReady
+		}
+	}
+
+	conditionChanged = conditionChanged || meta.SetStatusCondition(&sa.Status.Conditions, deployedCondition)
+
+	if conditionChanged || sa.Status.ObservedGeneration != sa.Generation {
+		sa.Status.ObservedGeneration = sa.Generation
+		if err := a.kube.Status().Update(ctx, sa); err != nil {
+			return fmt.Errorf("failed to update sandboxagent status: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (a *kagentReconciler) reconcileAgentStatus(ctx context.Context, agent *v1alpha2.Agent, err error) error {
 	var (
 		status  metav1.ConditionStatus
@@ -173,20 +321,6 @@ func (a *kagentReconciler) reconcileAgentStatus(ctx context.Context, agent *v1al
 	}
 
 	switch agent.Spec.Type {
-	case v1alpha2.AgentType_Sandbox:
-		if a.sandboxBackend == nil {
-			deployedCondition.Status = metav1.ConditionUnknown
-			deployedCondition.Reason = "SandboxBackendNotConfigured"
-			deployedCondition.Message = "Sandbox backend is not configured"
-			break
-		}
-		st, reason, msg := a.sandboxBackend.ComputeReady(ctx, a.kube, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name})
-		deployedCondition.Status = st
-		deployedCondition.Reason = reason
-		deployedCondition.Message = msg
-		if st == metav1.ConditionTrue {
-			deployedCondition.Reason = AgentReadyReasonWorkloadReady
-		}
 	default:
 		// Check if the deployment exists
 		deployment := &appsv1.Deployment{}

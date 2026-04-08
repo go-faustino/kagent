@@ -310,6 +310,16 @@ export interface SandboxAgentSpec {
   networkPolicyManagement?: SandboxNetworkPolicyManagement;
   /** When networkPolicyManagement is Managed; ignored when Unmanaged. */
   networkPolicy?: SandboxNetworkPolicySpec;
+  description?: string;
+  skills?: SkillForAgent;
+}
+
+/** Kubernetes SandboxAgent CRD (kagent.dev/v1alpha2). */
+export interface SandboxAgent {
+  apiVersion?: string;
+  kind?: string;
+  metadata: ResourceMetadata;
+  spec: SandboxAgentSpec;
 }
 
 export interface AgentSpec {

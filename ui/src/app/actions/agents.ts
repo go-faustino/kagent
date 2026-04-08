@@ -1,6 +1,6 @@
 "use server";
 
-import { AgentSpec, BaseResponse, DeclarativeAgentSpec, SandboxAgentSpec } from "@/types";
+import { AgentSpec, BaseResponse, DeclarativeAgentSpec, SandboxAgent, SandboxAgentSpec } from "@/types";
 import { buildSandboxNetworkPolicyPayload, isSandboxNetworkPolicySpecEmpty } from "@/lib/sandboxNetworkPolicy";
 import { Agent, AgentResponse, Tool } from "@/types";
 import { revalidatePath } from "next/cache";
@@ -138,53 +138,6 @@ function fromAgentFormDataToAgent(agentFormData: AgentFormData): Agent {
         serviceAccountName: trimmedSA,
       };
     }
-  } else if (type === "Sandbox") {
-    const decl: DeclarativeAgentSpec = {
-      systemMessage: agentFormData.systemPrompt || "",
-      modelConfig: modelConfigName || "",
-      stream: agentFormData.stream ?? true,
-      tools: convertTools(agentFormData.tools || []),
-    };
-
-    if (agentFormData.skillRefs && agentFormData.skillRefs.length > 0) {
-      base.spec!.skills = {
-        refs: agentFormData.skillRefs,
-      };
-    }
-
-    if (agentFormData.memory?.modelConfig) {
-      const memoryModel = agentFormData.memory.modelConfig;
-      const memoryModelName = k8sRefUtils.isValidRef(memoryModel)
-        ? k8sRefUtils.fromRef(memoryModel).name
-        : memoryModel;
-      decl.memory = {
-        modelConfig: memoryModelName,
-        ttlDays: agentFormData.memory.ttlDays,
-      };
-    }
-
-    if (agentFormData.context) {
-      decl.context = agentFormData.context;
-    }
-
-    const trimmedSA = agentFormData.serviceAccountName?.trim();
-    if (trimmedSA) {
-      decl.deployment = {
-        ...decl.deployment,
-        serviceAccountName: trimmedSA,
-      };
-    }
-
-    const sandboxSpec: SandboxAgentSpec = { declarative: decl };
-    const npm = agentFormData.sandboxNetworkPolicyManagement ?? "Unmanaged";
-    if (npm === "Managed") {
-      sandboxSpec.networkPolicyManagement = "Managed";
-      const payload = buildSandboxNetworkPolicyPayload(agentFormData.sandboxNetworkPolicy);
-      if (!isSandboxNetworkPolicySpecEmpty(payload)) {
-        sandboxSpec.networkPolicy = payload;
-      }
-    }
-    base.spec!.sandbox = sandboxSpec;
   } else if (type === "BYO") {
     base.spec!.byo = {
       deployment: {
@@ -205,6 +158,139 @@ function fromAgentFormDataToAgent(agentFormData: AgentFormData): Agent {
   }
 
   return base as Agent;
+}
+
+function fromAgentFormDataToSandboxAgent(agentFormData: AgentFormData): SandboxAgent {
+  const modelConfigName = agentFormData.modelName?.includes("/")
+    ? agentFormData.modelName.split("/").pop() || ""
+    : agentFormData.modelName;
+
+  const agentNamespace = agentFormData.namespace || "";
+
+  const convertTools = (tools: Tool[]) =>
+    tools.map((tool) => {
+      if (isMcpTool(tool)) {
+        const mcpServer = tool.mcpServer;
+        if (!mcpServer) {
+          throw new Error("MCP server not found");
+        }
+
+        let name = mcpServer.name;
+        let namespace: string | undefined = mcpServer.namespace;
+
+        if (k8sRefUtils.isValidRef(mcpServer.name)) {
+          const parsed = k8sRefUtils.fromRef(mcpServer.name);
+          name = parsed.name;
+        }
+
+        if (!namespace) {
+          namespace = agentNamespace;
+        }
+
+        return {
+          type: "McpServer",
+          mcpServer: {
+            name,
+            namespace,
+            kind: mcpServer.kind,
+            apiGroup: mcpServer.apiGroup,
+            toolNames: mcpServer.toolNames,
+          },
+        } as Tool;
+      }
+
+      if (tool.type === "Agent") {
+        const ag = tool.agent;
+        if (!ag) {
+          throw new Error("Agent not found");
+        }
+
+        let name = ag.name;
+        let namespace: string | undefined = ag.namespace;
+
+        if (k8sRefUtils.isValidRef(name)) {
+          const parsed = k8sRefUtils.fromRef(name);
+          name = parsed.name;
+        }
+
+        if (!namespace) {
+          namespace = agentNamespace;
+        }
+
+        return {
+          type: "Agent",
+          agent: {
+            name,
+            namespace,
+            kind: ag.kind || "Agent",
+            apiGroup: ag.apiGroup || "kagent.dev",
+          },
+        } as Tool;
+      }
+
+      console.warn("Unknown tool type:", tool);
+      return tool as Tool;
+    });
+
+  const decl: DeclarativeAgentSpec = {
+    systemMessage: agentFormData.systemPrompt || "",
+    modelConfig: modelConfigName || "",
+    stream: agentFormData.stream ?? true,
+    tools: convertTools(agentFormData.tools || []),
+  };
+
+  if (agentFormData.memory?.modelConfig) {
+    const memoryModel = agentFormData.memory.modelConfig;
+    const memoryModelName = k8sRefUtils.isValidRef(memoryModel)
+      ? k8sRefUtils.fromRef(memoryModel).name
+      : memoryModel;
+    decl.memory = {
+      modelConfig: memoryModelName,
+      ttlDays: agentFormData.memory.ttlDays,
+    };
+  }
+
+  if (agentFormData.context) {
+    decl.context = agentFormData.context;
+  }
+
+  const trimmedSA = agentFormData.serviceAccountName?.trim();
+  if (trimmedSA) {
+    decl.deployment = {
+      ...decl.deployment,
+      serviceAccountName: trimmedSA,
+    };
+  }
+
+  const spec: SandboxAgentSpec = {
+    declarative: decl,
+    description: agentFormData.description,
+  };
+
+  if (agentFormData.skillRefs && agentFormData.skillRefs.length > 0) {
+    spec.skills = {
+      refs: agentFormData.skillRefs,
+    };
+  }
+
+  const npm = agentFormData.sandboxNetworkPolicyManagement ?? "Unmanaged";
+  if (npm === "Managed") {
+    spec.networkPolicyManagement = "Managed";
+    const payload = buildSandboxNetworkPolicyPayload(agentFormData.sandboxNetworkPolicy);
+    if (!isSandboxNetworkPolicySpecEmpty(payload)) {
+      spec.networkPolicy = payload;
+    }
+  }
+
+  return {
+    apiVersion: "kagent.dev/v1alpha2",
+    kind: "SandboxAgent",
+    metadata: {
+      name: agentFormData.name,
+      namespace: agentFormData.namespace || "",
+    },
+    spec,
+  };
 }
 
 export async function getAgent(agentName: string, namespace: string): Promise<BaseResponse<AgentResponse>> {
@@ -279,6 +365,31 @@ export async function createAgent(agentConfig: AgentFormData, update: boolean = 
       if (k8sRefUtils.isValidRef(agentConfig.modelName)) {
         agentConfig.modelName = k8sRefUtils.fromRef(agentConfig.modelName).name;
       }
+    }
+
+    if (agentConfig.type === "Sandbox") {
+      const sandboxPayload = fromAgentFormDataToSandboxAgent(agentConfig);
+      const ns = sandboxPayload.metadata.namespace || "";
+      const name = sandboxPayload.metadata.name;
+      const path = update ? `/sandboxagents/${ns}/${name}` : `/sandboxagents`;
+      const response = await fetchApi<BaseResponse<AgentResponse>>(path, {
+        method: update ? "PUT" : "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(sandboxPayload),
+      });
+
+      const agent = response.data?.agent;
+      if (!agent) {
+        throw new Error("Failed to create sandbox agent");
+      }
+
+      const agentRef = k8sRefUtils.toRef(agent.metadata.namespace || "", agent.metadata.name);
+
+      revalidatePath("/agents");
+      revalidatePath(`/agents/${agentRef}/chat`);
+      return { message: response.message || "Successfully created agent", data: agent };
     }
 
     const agentPayload = fromAgentFormDataToAgent(agentConfig);

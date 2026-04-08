@@ -3,6 +3,7 @@
   - kagent.dev
   resources:
   - agents
+  - sandboxagents
   - modelconfigs
   - modelproviderconfigs
   - toolservers
@@ -18,6 +19,7 @@
   - kagent.dev
   resources:
   - agents/finalizers
+  - sandboxagents/finalizers
   - modelconfigs/finalizers
   - modelproviderconfigs/finalizers
   - toolservers/finalizers

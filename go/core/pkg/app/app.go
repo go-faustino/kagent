@@ -490,6 +490,15 @@ func Start(getExtensionConfig GetExtensionConfig) {
 		os.Exit(1)
 	}
 
+	if err = (&controller.SandboxAgentController{
+		Scheme:        mgr.GetScheme(),
+		Reconciler:    rcnclr,
+		AdkTranslator: apiTranslator,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SandboxAgent")
+		os.Exit(1)
+	}
+
 	if err = (&controller.ModelConfigController{
 		Scheme:     mgr.GetScheme(),
 		Reconciler: rcnclr,

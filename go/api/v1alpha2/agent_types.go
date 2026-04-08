@@ -30,14 +30,16 @@ import (
 	"trpc.group/trpc-go/trpc-a2a-go/server"
 )
 
-// AgentType represents the agent type
-// +kubebuilder:validation:Enum=Declarative;BYO;Sandbox
+// AgentType represents the agent type (Agent CRD only: Declarative or BYO).
+// AgentType_Sandbox is retained for synthetic Agent objects produced from SandboxAgent (translator/API).
+// +kubebuilder:validation:Enum=Declarative;BYO
 type AgentType string
 
 const (
 	AgentType_Declarative AgentType = "Declarative"
 	AgentType_BYO         AgentType = "BYO"
-	AgentType_Sandbox     AgentType = "Sandbox"
+	// AgentType_Sandbox is not stored on Agent CRDs; use SandboxAgent instead. Used for in-memory translation only.
+	AgentType_Sandbox AgentType = "Sandbox"
 )
 
 // DeclarativeRuntime represents the runtime implementation for declarative agents
@@ -51,10 +53,11 @@ const (
 
 // AgentSpec defines the desired state of Agent.
 // +kubebuilder:validation:XValidation:message="type must be specified",rule="has(self.type)"
-// +kubebuilder:validation:XValidation:message="type must be Declarative, BYO, or Sandbox",rule="self.type == 'Declarative' || self.type == 'BYO' || self.type == 'Sandbox'"
-// +kubebuilder:validation:XValidation:message="declarative, byo, or sandbox must match type",rule="(self.type == 'Declarative' && has(self.declarative)) || (self.type == 'BYO' && has(self.byo)) || (self.type == 'Sandbox' && has(self.sandbox))"
+// +kubebuilder:validation:XValidation:message="type must be Declarative or BYO",rule="self.type == 'Declarative' || self.type == 'BYO'"
+// +kubebuilder:validation:XValidation:message="declarative or byo must match type",rule="(self.type == 'Declarative' && has(self.declarative)) || (self.type == 'BYO' && has(self.byo))"
+// +kubebuilder:validation:XValidation:message="sandbox belongs on SandboxAgent CRD, not Agent",rule="!has(self.sandbox)"
 type AgentSpec struct {
-	// +kubebuilder:validation:Enum=Declarative;BYO;Sandbox
+	// +kubebuilder:validation:Enum=Declarative;BYO
 	// +kubebuilder:default=Declarative
 	Type AgentType `json:"type"`
 
@@ -62,6 +65,9 @@ type AgentSpec struct {
 	BYO *BYOAgentSpec `json:"byo,omitempty"`
 	// +optional
 	Declarative *DeclarativeAgentSpec `json:"declarative,omitempty"`
+
+	// Sandbox is only populated on synthetic Agent objects used for translation and API responses (from SandboxAgent).
+	// Do not set this on persisted Agent resources; use the SandboxAgent CRD instead.
 	// +optional
 	Sandbox *SandboxAgentSpec `json:"sandbox,omitempty"`
 
@@ -82,7 +88,7 @@ type AgentSpec struct {
 	AllowedNamespaces *AllowedNamespaces `json:"allowedNamespaces,omitempty"`
 }
 
-// EffectiveDeclarative returns declarative configuration for agent types that use it (Declarative, Sandbox).
+// EffectiveDeclarative returns declarative configuration for Declarative agents, or for synthetic Sandbox agents (in-memory).
 func (s *AgentSpec) EffectiveDeclarative() *DeclarativeAgentSpec {
 	if s == nil {
 		return nil
@@ -119,10 +125,9 @@ type SandboxNetworkPolicySpec struct {
 	Egress []networkingv1.NetworkPolicyEgressRule `json:"egress,omitempty"`
 }
 
-// SandboxAgentSpec configures an Agent whose workload is reconciled by a pluggable sandbox backend
-// (for example kubernetes-sigs/agent-sandbox). The nested declarative block matches AgentType_Declarative.
-// Sandbox-type agents are always provisioned via extensions.agents.x-k8s.io SandboxTemplate + SandboxClaim
-// (same translated pod as a declarative Deployment); the core Sandbox is created by the claim controller.
+// SandboxAgentSpec is the spec of the SandboxAgent CRD (sandbox-isolated workload).
+// It is also embedded as spec.sandbox on synthetic Agent objects built for translation/API responses.
+// Workloads use extensions.agents.x-k8s.io SandboxTemplate + SandboxClaim.
 type SandboxAgentSpec struct {
 	// Declarative holds model, tools, prompts, and related settings — same shape as spec.declarative for standard declarative agents.
 	// +kubebuilder:validation:Required
@@ -138,6 +143,17 @@ type SandboxAgentSpec struct {
 	// When omitted, the agent-sandbox controller applies its secure default policy. Ignored when NetworkPolicyManagement is Unmanaged.
 	// +optional
 	NetworkPolicy *SandboxNetworkPolicySpec `json:"networkPolicy,omitempty"`
+
+	// +optional
+	Description string `json:"description,omitempty"`
+
+	// Skills to load into the agent (same semantics as Agent.spec.skills).
+	// +optional
+	Skills *SkillForAgent `json:"skills,omitempty"`
+
+	// AllowedNamespaces defines which namespaces may reference this SandboxAgent as a tool (same semantics as Agent).
+	// +optional
+	AllowedNamespaces *AllowedNamespaces `json:"allowedNamespaces,omitempty"`
 }
 
 // EffectiveSandboxNetworkPolicyManagement returns Unmanaged when unset or empty.
